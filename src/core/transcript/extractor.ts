@@ -226,7 +226,8 @@ export function parseTranscriptContent(
     // defensively. Real transcripts contain types beyond user/assistant.
     if (lineType !== "user" && lineType !== "assistant") continue;
 
-    // session_id is taken from the first non-summary line that carries it.
+    // session_id is taken from the first user/assistant line that carries it
+    // (we already filtered summary/unknown above).
     if (sessionId === undefined && typeof parsed.sessionId === "string") {
       sessionId = parsed.sessionId;
     }
@@ -313,7 +314,7 @@ export function parseTranscriptContent(
   if (sessionId === undefined) {
     throw new TranscriptParseError(
       "missing_session_id",
-      "First non-summary line is missing `sessionId`" +
+      "No user/assistant line carried a `sessionId` field" +
         (sourcePath ? ` (${sourcePath})` : ""),
       { sourcePath },
     );
