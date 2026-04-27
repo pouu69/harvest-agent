@@ -51,8 +51,10 @@
  * Pass 2 — assistant tightening (applied if Pass 1 still over budget):
  *   - Assistant `text` blocks longer than {@link ASSISTANT_TEXT_THRESHOLD_PASS2}
  *     (200 chars) are truncated to that length + " ... [truncated <N> chars]"
- *     (no tail). Already-truncated outputs from Pass 1 are re-truncated from
- *     their current rendered form.
+ *     (no tail). Pass 2 re-renders from the original `block.text`, not from
+ *     the Pass-1 output, to avoid double-truncation artifacts like
+ *     "...[truncated A]...[truncated B]...". The pass is idempotent w.r.t. its
+ *     own input.
  *
  * Pass 3 — drop oldest assistant-only turns (applied if Pass 2 still over):
  *   - Walk messages in chronological order. Drop assistant messages one by
@@ -62,7 +64,7 @@
  *
  * Final guarantee: if even Pass 3 cannot meet the budget (because the
  * surviving user prompts alone exceed `target_tokens`), the function throws
- * {@link CompressionInfeasibleError}.
+ * {@link CompressionError} with `reason: "compression_infeasible"`.
  *
  * # Token estimation
  *
@@ -140,14 +142,6 @@ export class CompressionError extends Error {
     this.reason = reason;
   }
 }
-
-// Convenience aliases — the task description names these as if they were
-// distinct classes. We keep one class with a discriminant (per Task 8 style)
-// and expose named aliases so callers / tests can match on whichever spelling
-// is most natural. Matching on `err.reason` is the canonical form.
-export const CompressionUnnecessaryError = CompressionError;
-export const InvalidTargetTokensError = CompressionError;
-export const CompressionInfeasibleError = CompressionError;
 
 // -----------------------------------------------------------------------------
 // Tunables (documented in the file-header doc-comment above)

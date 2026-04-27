@@ -1,7 +1,7 @@
 # Harvest 구현 진행 현황
 
 > 본 문서는 `harvest.md` (v2.3) 의 §19 22단계 (실제로는 25개 — Task 22 를 4개로 분해) 를 phase 단위로 추적한다.
-> Task 1–8 은 완료. Task 9 부터 재개할 때 본 문서를 참조해 컨텍스트를 즉시 회복한다.
+> Task 1–11 은 완료. Task 12 부터 재개할 때 본 문서를 참조해 컨텍스트를 즉시 회복한다.
 
 ## 작업 방식
 
@@ -28,8 +28,11 @@
 | 6 | paths 정규화 | `d8cc86d` (+ M2 fix) | `src/core/kb/paths.ts` (`normalizePathsForKb` — region 외 drop, POSIX `/` 강제, dedup on output, kbDir → `"."`). `isInKbRegion` 재사용. 10 tests. |
 | 7 | ID 할당 | `16db9ca` | `src/core/kb/id.ts` (`allocateId(kbPath, category)` — 카테고리 dir + `.archive/` 동시 스캔, regex 필터, max+1, 999 overflow throw). 16 tests. |
 | 8 | transcript parser | `3ca4203` (+ I-1 wording fix) | `src/core/transcript/extractor.ts` (`parseTranscript`/`parseTranscriptContent`/`TranscriptParseError`, `ParsedTranscript`/`ParsedMessage`/`ContentBlock`). JSONL parse, summary skip, content normalize, dominant cwd + tie-break, touched_paths via `tool_use.input.file_path` only, tool_calls_summary buckets, has_errors, language @ 50% threshold, isSidechain preserve. 29 tests. §18.7 fixtures 3종 인라인. |
+| 9 | transcript 압축 | `08f1918` (+ alias / doc fix) | `src/core/transcript/compress.ts` (`compressTranscript`, `CompressMode`, `CompressedTranscript`, `CompressionError` w/ `reason`). full / summary / compressed 3-모드. compressed 는 3-pass cascade (assistant 800자/200자/drop oldest), user text 절대 보존. 15 tests. **병렬 worktree 디스패치 (Task 9–11 동시).** |
+| 10 | processed.json | `9b0774a` | `src/core/atomic-write.ts` (`atomicWrite` — temp + rename) + `src/core/processed.ts` (`readProcessed`/`writeProcessed`/`isAlreadyProcessed`/`upsertSession`/`markSessionAcrossKbs`/`ProcessedSchemaError`). `(session_id, sha256)` 멱등성, 다중 KB 동기 기록 (per-KB filter `kb_actions`), schema_version=1 검증. 27 tests. atomic-write 위치는 plan §14.2 의 `src/core/kb/` → `src/core/` 로 이동 (lock + processed 둘 다 사용 → 상위 위치 정당화). |
+| 11 | Lock | `0d8a449` | `src/core/lock.ts` (`acquireLock`/`releaseLock`/`LockBlockedError`/`LockReleaseMismatchError`/`LockBlockedReason`/`LockHandle`/`LockInfo`/`AcquireLockOptions`). `O_EXCL` (`flag:"wx"`) 로 race-free, ESRCH/EPERM/host-mismatch 분기, 24h mtime stale 임계값, single-retry livelock 가드. 14 tests (`_kill`/`_mtimeMs` 주입 시감). |
 
-테스트: 102/102 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
+테스트: 158/158 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
 
 ### 발견된 spec 결함 → [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) 참고
 
@@ -54,9 +57,6 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 
 | # | Task | 핵심 산출물 | 의존성 | 참조 |
 |---|---|---|---|---|
-| 9 | transcript 압축 | `src/core/transcript/compress.ts` — target_tokens 충족, user 보존/assistant truncate/tool_result 압축. mode `full`/`summary`/`compressed` 지원 | Task 8 | §9.3 read_transcript |
-| 10 | `processed.json` | `src/core/processed.ts` — read/write, `(session_id, sha256)` 멱등성, **다중 KB 동기 기록**, atomic write | Task 2 (`ProcessedSession`), atomic-write 헬퍼 | §11 |
-| 11 | Lock | `src/core/lock.ts` — `.harvest/.lock` create/release, PID alive (`process.kill(pid,0)`), same-host vs cross-host, stale lock 자동 제거 | — | §11.4 |
 | 12 | INDEX builder | `src/core/kb/index-builder.ts` — 4-column 표 (Severity 포함 anti-patterns), Critical 섹션 (cap 5), Status Summary, `MM-DD`/`YYYY-MM-DD` 자동, 200줄 cap, `deprecated`/`superseded`/`archived` 표에서 제외 | Task 4, Task 7 | §7.3, §7.4, §7.5 |
 | 13 | `harvest init` | `src/cli/init.ts` + argv parser (§14.5) — `.harvest/` + 4 카테고리 dir + `.archive/` + `.state/` 생성, CLAUDE.md marker block 추가, `--scan` 모노레포 자동 감지 (`pnpm-workspace.yaml`/`turbo.json`/`nx.json`/...) | Task 5, Task 11, Task 12 | §12.1, §13, §14.5 |
 
@@ -95,7 +95,7 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 
 ## Phase 별 재개 권장 순서
 
-1. **Phase 1 잔여 (Task 9–13, 5개)** — 모두 결정론, LLM 의존 0. 같은 세션에서 연속 실행 시 컨텍스트 부담 적음. **다음 세션 시작 시 여기부터.**
+1. **Phase 1 잔여 (Task 12–13, 2개)** — 모두 결정론, LLM 의존 0. **다음 세션 시작 시 여기부터.**
 2. **Phase 2 (Task 14–18, 5개)** — 도구 5개 + 5개 + 2개 + LLM 도구 1개 + MCP wrap. Task 17 만 새 SDK 위험 존재. 17 직전에 SDK export 사전 검증 필요.
 3. **Phase 3 (Task 19–21, 3개)** — Agent SDK `query()` 실호출 시작. 환경변수 `ANTHROPIC_API_KEY` 가 있는 환경에서만 end-to-end 검증 가능. mock 모드로도 빌드 검증 가능.
 4. **Phase 4 (Task 22a–22d, 4개)** — 안정성/품질/배포. 이전 Phase 결과 반영해 픽스처/문서 작성.
