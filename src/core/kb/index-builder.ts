@@ -279,9 +279,12 @@ export function buildIndexMarkdown(opts: BuildIndexOptions): BuildIndexResult {
   lines.push(`- Active: ${activeTotal} items`);
   lines.push(`- Deprecated: ${deprecatedCount} items`);
   lines.push(`- Superseded: ${supersededCount} items`);
-  if (archivedCount > 0) {
-    lines.push(`- Archived: ${archivedCount} items`);
-  }
+  // Always emit Archived (even at 0) so the document shape is stable. The
+  // §7.3 example omits this line; §18.3 includes it. We pick the always-emit
+  // form to match every other always-emit decision in this builder (empty
+  // tables still get headings, empty Critical still emits "_(none)_") — see
+  // SPEC_DEFECTS.md I-3 for the §7.3↔§18.3 reconciliation.
+  lines.push(`- Archived: ${archivedCount} items`);
   lines.push("");
   lines.push(
     "(deprecated / superseded / archived 항목은 표에서 제외, 카운트만 노출)",
@@ -346,16 +349,10 @@ function listMarkdownFiles(dir: string): string[] {
   return out;
 }
 
-const SLUG_RE_BY_PREFIX: Record<string, RegExp> = {
-  D: /^D-\d{3}-(.*)\.md$/,
-  L: /^L-\d{3}-(.*)\.md$/,
-  R: /^R-\d{3}-(.*)\.md$/,
-  A: /^A-\d{3}-(.*)\.md$/,
-};
-
 function extractSlugFromFilename(fileName: string, prefix: string): string {
-  const re = SLUG_RE_BY_PREFIX[prefix];
-  if (!re) return "";
+  // Prefix is one of D / L / R / A (single-letter, validated by idPrefix).
+  // Regex shape matches §4.5 file naming: `<ID>-<title-slug>.md`.
+  const re = new RegExp(`^${prefix}-\\d{3}-(.*)\\.md$`);
   const m = re.exec(fileName);
   return m ? m[1]! : "";
 }

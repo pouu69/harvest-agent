@@ -66,6 +66,18 @@ export function nowIso(): string {
 
 구현은 §10.1 의 `claude-sonnet-4-6` 을 default 로 잡을 것. (Task 17, Task 20 시점에 결정 필요.)
 
+### I-3. §7.3 INDEX.md 예시 ↔ §18.3 예시의 Status Summary 형태 불일치
+
+**위치**:
+- §7.3 lines 599–608 — Status Summary 예시 (Archived 줄 없음, 3줄: Active/Deprecated/Superseded + 괄호 주석)
+- §18.3 line 2991 — `- Archived: 0 items` 라인 명시 포함
+
+**문제**: 두 예시가 같은 데이터에 대해 다른 출력 모양을 보임. §7.3 은 "0 일 때 생략" 으로 읽히고, §18.3 은 "항상 노출" 로 읽힘.
+
+**구현 결정**: Task 12 (`src/core/kb/index-builder.ts`, commit `a9ea8d4` + follow-up) 는 항상 `Archived: N items` 줄을 emit (N=0 포함). 근거: 이 builder 의 다른 모든 결정 ("빈 표도 헤딩 + 헤더 행 emit", "Critical 0 개 → `_(none)_`") 이 *문서 모양 안정성* 을 우선시함. Claude 가 INDEX 를 매 세션 launch 시 import 해서 파싱하므로 형태가 흔들리면 안 됨.
+
+**보정 권장**: §7.3 의 예시에 `- Archived: 0 items` 줄 추가하여 §18.3 과 일치시키기. 또는 §7.5 size-control 표에 명시적인 룰 한 줄 추가 ("Archived 줄은 N=0 일 때도 항상 노출").
+
 ### I-2. §14.3 `zod: ^3` vs 실제 SDK peer-dep `zod: ^4`
 
 **위치**: §14.3 lines 2426–2440

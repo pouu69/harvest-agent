@@ -110,12 +110,11 @@ describe("buildIndexMarkdown — empty KB", () => {
     // Critical: zero items → "_(none)_".
     expect(r.content).toContain("_(none)_");
 
-    // Status Summary lines.
+    // Status Summary lines — always emitted (even at 0) for stable doc shape.
     expect(r.content).toContain("- Active: 0 items");
     expect(r.content).toContain("- Deprecated: 0 items");
     expect(r.content).toContain("- Superseded: 0 items");
-    // Archived line is suppressed when zero.
-    expect(r.content).not.toContain("- Archived:");
+    expect(r.content).toContain("- Archived: 0 items");
 
     expect(r.content).toContain(
       "(deprecated / superseded / archived 항목은 표에서 제외, 카운트만 노출)",
