@@ -144,6 +144,8 @@ export function nowIso(): string {
 
 **처리 방침**: Phase 2 에서는 미구현 유지. Task 22a (시나리오 픽스처) 에서 50% 실패 케이스를 측정하여 retry 의 실효성 검증 후 결정.
 
+**Task 22a 측정 결과 (post-v1 결정 대기)**: 시나리오 01 의 hand-authored fixture 로는 retry 효과 검증 *불가능*. replay 모드는 결정론적이므로 재시도 시에도 같은 fail 결과를 반환. 실제 retry 효과 검증은 record/live 모드에서 LLM 의 random noise 를 관찰해야 가능하며, 이는 §16.4 의 비용 정책상 정기 통합 테스트로만 수행. 따라서 retry 구현 결정은 **post-v1 record-mode 측정 시점까지 보류** (Task 22a 의 fixture 는 validator-rejection 경로의 *도달 가능성* 만 입증).
+
 ### I-9. `cross_kb_id_format_error` 가 promote-item 의 I/O catch-all 로 오용됨
 
 **위치**: §9.5 line 1642 의 정의 — "rel-path 계산 실패 (KB 경로 부정확)"
