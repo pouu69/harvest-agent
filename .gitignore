@@ -6,3 +6,10 @@ coverage/
 *.log
 .env
 .env.local
+
+# Editor / IDE configs
+.idea/
+.vscode/
+
+# Subagent worktree workspaces (created by Agent tool isolation:"worktree" — ephemeral)
+.claude/
