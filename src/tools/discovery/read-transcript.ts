@@ -20,13 +20,14 @@
  *   - `target_tokens_unrealistic`   — `compressTranscript` threw
  *                                     `CompressionError` with reason
  *                                     `target_tokens_unrealistic`
- *   - `compression_failed`          — every other `CompressionError` reason
- *                                     (`target_tokens_out_of_range`,
- *                                     `compression_infeasible`). The §9.3 table
- *                                     does not enumerate these — we emit a
- *                                     bespoke code so callers can distinguish
- *                                     "the request was unreachable" from "the
- *                                     transcript was corrupt".
+ *
+ * `CompressionError` reasons other than `target_tokens_unrealistic`
+ * (`target_tokens_out_of_range`, `compression_infeasible`) map to
+ * `transcript_corrupt` with the specific reason in `details`. §9.3's table
+ * does not enumerate them; folding into `transcript_corrupt` keeps the
+ * Agent's recovery contract enum-clean. `target_tokens_out_of_range` is
+ * unreachable through the public `.min(1000).max(100000)` schema; it only
+ * fires from bypass paths.
  *
  * Layered architecture: imports `node:*`, `zod`, intra-`core/`. Never imports
  * from `cli/` or `agent/`.
@@ -168,12 +169,21 @@ export async function readTranscript(
           details: { reason: err.reason },
         };
       }
-      // Other reasons (out_of_range, infeasible) — surface via a bespoke code.
+      // Other CompressionError reasons (`target_tokens_out_of_range`,
+      // `compression_infeasible`) are not enumerated in §9.3's error table.
+      // Map to `transcript_corrupt` (the closest spec-listed code) with the
+      // specific reason in details — keeps the Agent's recovery contract
+      // honoring §9.3's enum while still letting callers branch on the
+      // underlying cause when needed. (out_of_range is unreachable through
+      // the public Zod schema's `.min(1000).max(100000)`; it can only fire
+      // from a bypass path that didn't run schema validation upstream.)
       return {
-        error: "compression_failed",
+        error: "transcript_corrupt",
         message: `압축 실패: ${err.reason}`,
         suggest:
-          "target_tokens를 1000~100000 범위에서 조정하거나 mode를 'full'/'summary'로",
+          err.reason === "compression_infeasible"
+            ? "이 세션 skip (mark_session_processed status: failed). 다른 세션 처리"
+            : "target_tokens를 1000~100000 범위에서 조정하거나 mode를 'full'/'summary'로",
         details: { reason: err.reason },
       };
     }

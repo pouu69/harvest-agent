@@ -49,6 +49,8 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 - **🟡 I-2** §14.3 `zod: ^3` ↔ 실제 SDK peer-dep `zod: ^4`
 - **🟡 I-3** §7.3 INDEX 예시 (Archived 줄 생략) ↔ §18.3 예시 (`Archived: 0 items` 명시) 불일치
 - **🟡 I-4** `harvest start` 기본 스코프: §12.1 (cwd 기반) ↔ §9.3 (`~/.claude/projects/` 전수)
+- **🟡 I-5** `list_unprocessed_sessions.discover_path` 선언만 됐고 미구현 (Task 20 wiring 시점에 활성화)
+- **🟡 I-6** `is_root` 분기: `get_kb_chain` (boundary 존중) vs `get_kb_state` (filesystem root까지)
 - **🟢 S-1~S-3** v1.x 잔재 stale section reference (`§8.5.1`, `§8.6.1`, `§8.7`)
 - **🟢 S-5** §11.1 예시의 `trivial-deterministic` (v2.3 enum 단순화 미반영)
 - **🟢 S-6** §8 Playbook 의 유령 도구명 `demote_item` (catalog 는 `promote_item(direction)` 통합)

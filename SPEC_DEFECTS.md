@@ -100,6 +100,28 @@ export function nowIso(): string {
 
 **구현 영향**: Task 14 가 현재 cwd 필터 없이 spec 그대로 진행 중 (위험 낮음 — 사전 필터가 KB 없는 transcript 는 자동 제외). Task 20 (`harvest start`) 시점에 `cwd_filter` 옵션 추가 또는 §12.1 의도 명확화 필요.
 
+### I-5. `list_unprocessed_sessions.discover_path` 입력 필드가 declared-but-unused
+
+**위치**: §9.3 lines 1052, 1089 (스키마 + `no_kb_found` 에러 코드)
+
+**구현 현황**: `src/tools/discovery/list-unprocessed-sessions.ts` (Task 14, commit `3d43ebd`) 가 schema 에 `discover_path: z.string().optional()` 를 선언하지만 handler 가 읽지 않음. `no_kb_found` 에러 코드도 emit 안 됨.
+
+**문제**: 스펙은 "지정 시 그 경로 하위 KB 자동 탐색" 으로 정의하지만 현재 silently 무시. silent ignore 가 worst-of-both-worlds (사용자가 동작 안 한다는 사실을 모름).
+
+**처리 방침**: Task 20 (`harvest start`) 시점에 `--discover` 플래그가 wiring 되면서 자연스럽게 활성화. 그때 `discover_path` 핸들링 + `no_kb_found` envelope + I-4 의 `cwd_filter` 도 함께 설계.
+
+### I-6. `is_root` 시맨틱 분기: `get_kb_chain` vs `get_kb_state`
+
+**위치**: §9.3 lines 1161 (`get_kb_chain.kb_chain[].is_root`), 1201 (`get_kb_state.is_root`)
+
+**구현 현황**:
+- `get_kb_chain` 의 `is_root` = `findKbChain` 결과의 마지막 entry (= `.git`/`$HOME`/`stopAt` 경계 존중)
+- `get_kb_state` 의 `defaultIsRoot` = 부모 디렉토리에 `.harvest/` 없으면 root (= filesystem root 까지 walk, 경계 없음)
+
+**문제**: 같은 KB 에 대해 두 도구가 다른 `is_root` 값을 줄 수 있음. 예: `~/.harvest` 가 존재하면 어떤 KB 도 `get_kb_state` 는 false 반환, `get_kb_chain` 은 `.git` 도달 시 true 반환.
+
+**처리 방침**: Task 18 (MCP wrap) / Task 20 (`harvest start`) 시점에 `get_kb_state` 의 input 에 `cwd?` 추가하여 `findKbChain` 재사용. 또는 `defaultIsRoot` 가 `.git`/`$HOME` 경계를 mirror 하도록 보강. 후자가 더 작은 변경.
+
 ### I-3. §7.3 INDEX.md 예시 ↔ §18.3 예시의 Status Summary 형태 불일치
 
 **위치**:
