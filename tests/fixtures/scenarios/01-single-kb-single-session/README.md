@@ -1,4 +1,4 @@
-# Scenario 01 — single KB, single session (EXTRACT failure-rate measurement)
+# Scenario 01 — single KB, single session (EXTRACT happy + validator-failure coverage)
 
 This scenario exercises `extract_items_from_transcript` end-to-end against a
 realistic, hand-authored Claude Code transcript. It is the first scenario
@@ -6,8 +6,10 @@ fixture under harvest.md §16.3.2 and was built for **Task 22a**:
 
 - Verify the EXTRACT path produces all 4 categories (decision, learning,
   reusable, anti-pattern) on the happy path.
-- **Measure the EXTRACT failure rate** so the controller can decide whether
-  SPEC_DEFECTS I-8 ("EXTRACT 50%-fail 1회 재시도") needs to be implemented.
+- Exercise both successful and validator-rejected paths so the EXTRACT
+  surface area is covered (per the Task 22a brief). This is the *fixture
+  floor* the controller uses as a coverage data point for SPEC_DEFECTS I-8
+  ("EXTRACT 50%-fail 1회 재시도") — **not** a measurement of real LLM behavior.
 - Stay narrowly scoped to the EXTRACT tool layer — full agent behavior
   validation (`harvest start` E2E) is deferred to Task 20 + scenario 02+.
 
@@ -67,44 +69,58 @@ Realistic touches:
 │       ├── .archive/
 │       └── .state/
 └── llm-responses/
-    ├── run-0.json … run-7.json  # happy path (4 valid candidates each)
-    └── run-8.json, run-9.json   # validator-failure path (all rejected)
+    ├── run-0.json    # happy path (4 valid candidates)
+    ├── run-1.json    # validator-fail variant 1 (slug/severity/heading rejects)
+    └── run-2.json    # validator-fail variant 2 (slug/tags/heading rejects)
 ```
 
-## How the test loop measures I-8
+## How the test loop covers the success + rejection paths
 
 `tests/scenarios/01-single-kb-single-session.test.ts` runs `extractItemsFromTranscript`
-**10 times in a row**, each invocation reading a different replay fixture (run-0 …
-run-9). Of those 10 fixtures:
+**3 times in a row**, each invocation reading a different replay fixture
+(run-0, run-1, run-2):
 
-- **8 happy** (`run-0` … `run-7`) — emit 4 valid candidates each. After the
-  9-step validator, `total_extracted=4` and `rejected_count=0`.
-- **2 validator-failures** (`run-8`, `run-9`) — emit candidates that all fail
-  the 9-step validator. The tool returns `error: "all_items_rejected"`.
+- **1 happy** (`run-0`) — emits 4 valid candidates. After the 9-step
+  validator: `total_extracted=4`, `rejected_count=0`.
+- **2 validator-failures** (`run-1`, `run-2`) — emit candidates that all fail
+  the 9-step validator via *distinct* rejection reasons (short slug+missing
+  English heading vs uppercase slug + bad-enum severity + Korean-only
+  headings). The tool returns `error: "all_items_rejected"`.
 
-Result: 8/10 success, 2/10 failure. The test logs `[I-8 measurement] EXTRACT
-failure rate over 10 runs: 2/10 (20%)` to stderr so the controller can update
-SPEC_DEFECTS I-8 with the measured rate.
+Result: 1/3 success, 2/3 failure. The test logs `[I-8 fixture-floor] EXTRACT
+validator-failure coverage over 3 runs: 2/3 (67%) (synthetic; not measured
+LLM behavior — see README)` to stderr.
 
-The fixture mix is intentional and deterministic — replay mode is, by
-definition, deterministic. It is **not** a sample of real LLM behavior; it is
-a synthetic floor exercising both successful and rejected validator paths so
-the test surface area covers both (per the Task 22a brief).
+The fixture mix is **synthetic and deterministic** (replay mode is, by
+definition, deterministic). The 2/3 ratio is a function of authored-fixture
+counts, not a real failure-rate signal. SPEC_DEFECTS I-8 still owes an actual
+measurement — the controller treats this scenario as coverage of both branches
+of the validator outcome envelope, not as measurement.
+
+### Why 3 runs (not 10)?
+
+An earlier draft of this scenario ran the loop 10 times — but with 8 of the 10
+fixtures byte-identical happy responses. 8 copies of the same response don't
+test variance, just disk I/O. The current shape (1 happy + 2 distinct
+validator-rejection variants) is the smallest set that exercises both
+outcomes. If a future scenario needs to vary candidate counts / tag domains /
+universality mixes across multiple happy fixtures, that belongs in a separate
+scenario authored for that purpose.
 
 ## Fixture-key derivation (custom keyFn)
 
 `FixtureLlmCaller`'s default key is a SHA-256 of `{ systemPrompt, userMessage,
 model, allowedTools (sorted) }`. With a single fixed transcript and
-deterministic prompt builder, every one of the 10 runs would compute the
-**same** SHA-256 key — and replay would return the same response 10 times.
-That defeats the I-8 measurement.
+deterministic prompt builder, every one of the 3 runs would compute the
+**same** SHA-256 key — and replay would return the same response 3 times.
+That defeats the dual-path coverage.
 
 The test sidesteps this by injecting a custom `keyFn` that ignores the args
 and returns `run-${i}` per call (where `i` is the per-run index). This way:
 
 - Run 0 reads `llm-responses/run-0.json`
 - Run 1 reads `llm-responses/run-1.json`
-- … etc.
+- Run 2 reads `llm-responses/run-2.json`
 
 Each fixture's `args` block is a stub (a human-readable note pointing here)
 because the keyFn never reads it. Fixture mismatch diagnostics still work via
@@ -113,6 +129,13 @@ the README + the on-disk file naming.
 If a future scenario needs prompt-stable keying (e.g. the test re-runs against
 the *same* fixture across multiple session inputs), it should switch to
 `defaultFixtureKey` and accept that all runs hit the same fixture.
+
+## Test ↔ YAML coupling
+
+Every field in `expected-properties.yaml` is consumed by at least one
+assertion in the test file. The test loads the YAML once at startup via
+`yaml.parse(readFileSync(...))` — there are no hard-coded constants. If a
+field is added to the YAML, it must be wired up to an assertion (or removed).
 
 ## Out of scope (Task 22a)
 
@@ -134,4 +157,4 @@ npx vitest run tests/scenarios/01-single-kb-single-session.test.ts
 ```
 
 Expected: 1 test file, 1 test, passing in <1s. The stderr line emitted by
-`console.error` is the I-8 measurement data point.
+`console.error` is the I-8 fixture-floor coverage data point.

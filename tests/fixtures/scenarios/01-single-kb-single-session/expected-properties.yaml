@@ -4,6 +4,10 @@
 # `extract` block captures EXTRACT-tool-level expectations (Task 22a's actual
 # scope; the §16.3.2 `post_run_assertions` block is intentionally minimal here
 # because Task 20 — `harvest start` E2E — owns the full agent-behavior loop).
+#
+# Every field below is consumed by at least one assertion in
+# tests/scenarios/01-single-kb-single-session.test.ts. Documentation-only
+# context (e.g. what's deferred to later tasks) lives in README.md, not here.
 
 session_id: sess-jwt-refresh-loop-001
 transcript: transcripts/sess-jwt-refresh-loop-001.jsonl
@@ -11,21 +15,23 @@ kb_chain_paths:
   - /Users/dev/projects/myapp/apps/web/.harvest
 
 extract:
-  # 10-run replay loop measures EXTRACT failure rate per SPEC_DEFECTS I-8.
-  # Fixture mix: 8 happy + 2 all-rejected. Expected outcome: 80% success / 20%
-  # failure. Asserted as a tolerance window (the 8/2 split itself is exact —
-  # FixtureLlmCaller is deterministic — but the test phrases the assertion as
-  # "≥1 success" so the test stays meaningful if fixture counts ever change.)
-  total_runs: 10
+  # 3-run replay loop: 1 happy + 2 distinct validator-failure variants.
+  # The split is exact (FixtureLlmCaller is deterministic) and exercises both
+  # the success path and two distinct rejection paths through the 9-step
+  # validator. This is a synthetic floor (per SPEC_DEFECTS I-8) — NOT a
+  # measurement of real LLM failure rate. See README for rationale.
+  total_runs: 3
   min_successes: 1                # smoke — proves the happy path works
-  expected_success_count: 8       # exact (deterministic replay)
+  expected_success_count: 1       # exact (deterministic replay)
   expected_failure_count: 2       # exact (deterministic replay)
 
-  # Per-success expectations: each happy fixture emits ≥1 of every category.
-  # The validator never drops these (verified via validateCandidates).
+  # Per-success expectations: the happy fixture emits exactly 4 valid candidates
+  # (one per category). The 4/4 tight bound is intentional given that replay
+  # mode is fully deterministic — we want to detect any drift if the validator
+  # or fixture changes. The validator never drops these candidates.
   on_success:
-    candidate_count_min: 4
-    candidate_count_max: 4
+    candidate_count_min: 4         # tight bound — fixture is deterministic
+    candidate_count_max: 4         # tight bound — fixture is deterministic
     rejected_count: 0
     must_have_category_at_least_one:
       - decision
@@ -55,17 +61,7 @@ extract:
 
 # Replay assertions per §16.3.2 agent_behavior block — adapted for the
 # extract-tool layer. We don't run the full Agent yet (Task 20), so
-# `must_call_tool_at_least` here means "the LlmCaller is invoked at least once
-# per run" (sanity check the wiring works).
+# `must_call_llm_caller_at_least` here means "the LlmCaller is invoked at least
+# once per run" (sanity check the wiring works).
 replay_assertions:
-  must_call_llm_caller_at_least: 10  # one call per run
-
-# Out of scope for Task 22a (deferred to Task 20 + scenarios 02+):
-#   - post_run_assertions on KB filesystem state (no harvest start E2E)
-#   - agent_behavior.max_turns_used_p95 (no Agent loop)
-#   - cross-KB routing (single-KB scenario by design)
-out_of_scope:
-  - post_run_kb_filesystem_state
-  - agent_max_turns
-  - multi_kb_routing
-  - promote_demote_paths
+  must_call_llm_caller_at_least: 3  # one call per run

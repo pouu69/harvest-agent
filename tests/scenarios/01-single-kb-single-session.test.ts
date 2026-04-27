@@ -9,15 +9,22 @@
  *     not `~/.claude/projects/`).
  *   - Builds an `extractItemsFromTranscript` call with a `FixtureLlmCaller`
  *     pointed at `tests/fixtures/scenarios/01-single-kb-single-session/llm-responses/`.
- *   - Runs the extract path 10 times to measure the failure rate per
- *     SPEC_DEFECTS I-8 ("EXTRACT 50%-fail 1회 재시도 미구현 — Task 22a 측정 후 결정").
- *   - Asserts ≥1 success across the 10 runs (smoke) + the success path emits
+ *   - Runs the extract path 3 times with a fixed mix (1 happy + 2 distinct
+ *     validator-failure variants) — a synthetic floor for SPEC_DEFECTS I-8
+ *     ("EXTRACT 50%-fail 1회 재시도 미구현 — Task 22a 측정 후 결정"), not a
+ *     measurement of real LLM behavior. See the scenario README for rationale.
+ *   - Asserts ≥1 success across the runs (smoke) + the success path emits
  *     all 4 categories with the validator dropping nothing.
- *   - Logs the failure rate to stderr for the controller to pick up.
+ *   - Logs the synthetic floor to stderr so the controller can record the
+ *     coverage data point.
  *
- * The 10 fixtures are deterministically replayed via a custom `keyFn` that
+ * Every assertion is driven by `expected-properties.yaml` (loaded once at the
+ * top of the test). No hard-coded constants live in this file; if YAML drifts
+ * from reality, the test fails and forces a re-author.
+ *
+ * The fixtures are deterministically replayed via a custom `keyFn` that
  * returns `run-${i}` per call (since the production prompt-hash key would
- * collide across all 10 identical-prompt runs and defeat the measurement).
+ * collide across all identical-prompt runs and defeat the I-8 coverage).
  * See the scenario README for the rationale.
  */
 
@@ -70,6 +77,7 @@ interface ExpectedProperties {
       candidate_count_max: number;
       rejected_count: number;
       must_have_category_at_least_one: string[];
+      must_contain_tag_at_least_one: string[];
       universality_distribution: {
         app_specific_min: number;
         universal_min: number;
@@ -81,6 +89,9 @@ interface ExpectedProperties {
       error_code: string;
       rejected_count_min: number;
     };
+  };
+  replay_assertions: {
+    must_call_llm_caller_at_least: number;
   };
 }
 
@@ -102,7 +113,7 @@ function makeReadTranscriptShim(transcriptAbsPath: string): ReadTranscriptFn {
     // throw `target_tokens_unrealistic`. The EXTRACT prompt builder doesn't
     // care about compression metadata correctness for replay-mode testing
     // (compression_applied is purely informational in the user prompt).
-    const compressed = compressTranscript(parsed, "full", { target_tokens: 16000 });
+    const compressed = compressTranscript(parsed, "full");
     return {
       session_id: parsed.session_id,
       cwd: parsed.cwd,
@@ -118,15 +129,6 @@ function makeReadTranscriptShim(transcriptAbsPath: string): ReadTranscriptFn {
       has_errors: parsed.has_errors,
     };
   };
-}
-
-/**
- * Custom key fn: per-run index instead of prompt hash. See README for why.
- * The closure captures a per-test counter so each call within one test
- * advances to the next fixture file.
- */
-function makeRunIndexKeyFn(state: { i: number }) {
-  return (): string => `run-${state.i}`;
 }
 
 function isError(
@@ -155,9 +157,9 @@ function universalitiesIn(items: CandidateItem[]): Map<string, number> {
 // Test
 // -----------------------------------------------------------------------------
 
-describe("scenario 01 — single KB, single session, EXTRACT 10-run replay", () => {
+describe("scenario 01 — single KB, single session, EXTRACT replay", () => {
   it(
-    "measures EXTRACT failure rate over 10 runs and validates the success path",
+    "exercises EXTRACT happy + validator-failure paths and validates the success path",
     async () => {
       const expected = loadExpectedProperties();
       const transcriptPath = resolve(SCENARIO_DIR, expected.transcript);
@@ -168,13 +170,13 @@ describe("scenario 01 — single KB, single session, EXTRACT 10-run replay", () 
       const successes: ExtractItemsOutput[] = [];
       const failures: ExtractItemsErrorOutput[] = [];
       const callerInvocations = { count: 0 };
-      const keyState = { i: 0 };
 
       for (let i = 0; i < totalRuns; i++) {
-        keyState.i = i;
-        // A FixtureLlmCaller per run with the per-run keyFn baked in.
+        // Per-run fixture caller. The keyFn closes over `i` so each iteration
+        // points at a distinct fixture (run-0, run-1, run-2). See README for
+        // why we don't use the default prompt-hash key here.
         const fixtureCaller = new FixtureLlmCaller(fixturesDir, {
-          keyFn: makeRunIndexKeyFn(keyState),
+          keyFn: () => `run-${i}`,
         });
         const wrappedCaller = {
           async call(args: LlmCallerArgs) {
@@ -199,13 +201,16 @@ describe("scenario 01 — single KB, single session, EXTRACT 10-run replay", () 
         }
       }
 
-      // I-8 measurement output (controller reads this from stderr).
+      // I-8 fixture-floor output (synthetic; not measured LLM behavior — see
+      // README). The controller picks this up from stderr as a coverage data
+      // point, not a failure-rate measurement.
       const failureRate = failures.length / totalRuns;
       // eslint-disable-next-line no-console
       console.error(
-        `[I-8 measurement] EXTRACT failure rate over ${totalRuns} runs: ` +
-          `${failures.length}/${totalRuns} ` +
-          `(${(failureRate * 100).toFixed(0)}%)`,
+        `[I-8 fixture-floor] EXTRACT validator-failure coverage over ` +
+          `${totalRuns} runs: ${failures.length}/${totalRuns} ` +
+          `(${(failureRate * 100).toFixed(0)}%) ` +
+          `(synthetic; not measured LLM behavior — see README)`,
       );
 
       // --- Smoke: at least one success ---
@@ -213,12 +218,14 @@ describe("scenario 01 — single KB, single session, EXTRACT 10-run replay", () 
         expected.extract.min_successes,
       );
 
-      // --- Replay determinism: exact split (8 happy / 2 fail) ---
+      // --- Replay determinism: exact split (deterministic fixtures) ---
       expect(successes.length).toBe(expected.extract.expected_success_count);
       expect(failures.length).toBe(expected.extract.expected_failure_count);
 
       // --- LlmCaller wiring: 1 call per run ---
-      expect(callerInvocations.count).toBe(totalRuns);
+      expect(callerInvocations.count).toBeGreaterThanOrEqual(
+        expected.replay_assertions.must_call_llm_caller_at_least,
+      );
 
       // --- Per-success expectations ---
       for (const s of successes) {
@@ -236,9 +243,9 @@ describe("scenario 01 — single KB, single session, EXTRACT 10-run replay", () 
           expect(cats.has(required), `missing category: ${required}`).toBe(true);
         }
 
-        // Tag overlap — at least one of the expected anchor tags is present.
+        // Tag overlap — at least one of the YAML-declared anchor tags is present.
         const tags = tagsIn(s.candidates);
-        const anchorTags = ["auth", "concurrency", "security", "oauth", "axios"];
+        const anchorTags = expected.extract.on_success.must_contain_tag_at_least_one;
         const hit = anchorTags.some((t) => tags.has(t));
         expect(hit, `no anchor tag found in: ${[...tags].join(", ")}`).toBe(true);
 
