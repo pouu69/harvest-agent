@@ -77,10 +77,6 @@ export function parseItem(content: string, filePath?: string): KBItem {
   // Normalize CRLF → LF so line-based splitting is deterministic.
   const text = content.replace(/\r\n/g, "\n");
 
-  if (!text.startsWith("---\n") && text !== "---" && !text.startsWith("---\r")) {
-    throw new FrontmatterParseError("missing frontmatter block", { filePath });
-  }
-
   // Find the end of the frontmatter block: a `---` line on its own, after
   // the opening one. Use line-based search so we don't accidentally match
   // `---` inside a YAML scalar.
@@ -393,6 +389,12 @@ export function renderItem(item: {
   const yamlTrimmed = yamlBody.endsWith("\n") ? yamlBody.slice(0, -1) : yamlBody;
 
   const body = item.body;
+  // POSIX convention: text files end with `\n`. Normalizing here means
+  // repeated render→parse→render is byte-stable and editors that auto-add
+  // a trailing newline don't churn the diff. The parser itself does NOT
+  // normalize — it preserves whatever the input contains — so a body that
+  // arrived without a trailing newline keeps that shape until it round-trips
+  // through renderItem.
   const bodyWithTrailingNewline = body.length === 0
     ? ""
     : body.endsWith("\n") ? body : body + "\n";

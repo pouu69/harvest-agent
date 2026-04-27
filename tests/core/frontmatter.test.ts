@@ -347,6 +347,41 @@ describe("parseItem error cases", () => {
     expect(parsed.filePath).toBe("/some/path.md");
   });
 
+  it("preserves a body without a trailing newline on parse, and renderItem normalizes it", () => {
+    // Build raw text whose body intentionally has NO trailing `\n`.
+    const raw = [
+      "---",
+      "id: D-001",
+      "type: decision",
+      "title: x",
+      "summary: x",
+      "tags: [a]",
+      "paths: [src/**]",
+      "status: active",
+      "universality: universal",
+      "created: 2026-01-01T00:00:00+00:00",
+      "updated: 2026-01-01T00:00:00+00:00",
+      "---",
+      "",
+      "body without newline",
+    ].join("\n"); // note: no trailing "\n" appended.
+    expect(raw.endsWith("\n")).toBe(false);
+
+    // Parser preserves what's there: the body has no trailing newline.
+    const parsed = parseItem(raw);
+    expect(parsed.body).toBe("body without newline");
+
+    // Renderer normalizes: output ends with `\n` regardless of body input.
+    const rendered = renderItem(parsed);
+    expect(rendered.endsWith("\n")).toBe(true);
+
+    // Round-trip is byte-stable on a second render(parse(...)) pass.
+    const reparsed = parseItem(rendered);
+    expect(reparsed.body).toBe("body without newline\n");
+    const rerendered = renderItem(reparsed);
+    expect(rerendered).toBe(rendered);
+  });
+
   it("returns body='' when there is no body after the closing fence", () => {
     const text = [
       "---",
