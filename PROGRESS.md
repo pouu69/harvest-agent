@@ -1,7 +1,21 @@
 # Harvest 구현 진행 현황
 
 > 본 문서는 `harvest.md` (v2.3) 의 §19 22단계 (실제로는 25개 — Task 22 를 4개로 분해) 를 phase 단위로 추적한다.
-> **Task 1–22d 완료 (25/25). 첫 publish 전 `package.json` 의 `repository` URL `<owner>/<repo>` placeholder 만 채우면 됨.**
+> **Task 1–22d 완료 (25/25) + post-25 sweep (5건 review finding fix). 467/467 tests. 첫 publish 전 `package.json` 의 `repository` URL `<owner>/<repo>` placeholder 만 채우면 됨.**
+
+## Post-25 review sweeps
+
+홀리스틱 리뷰 (2회) + 정밀 리뷰 (1회) 후 발견된 결함 수정:
+
+| Sweep | Commit | 내용 |
+|---|---|---|
+| P0/P1/P2/P3 sweep | `ed05872` | **P1.1** runner 가 정상 종료 시 (success/max_turns/non-fatal error/SDK self-error) 모든 KB INDEX 재빌드 (per-KB 에러 격리, lock 해제 전 실행). **P1.2** `list_unprocessed_sessions` 스키마에 `cwd_filter` 추가 + `discover_path` 실제 사용 — out-of-scope 후보를 KB-chain check 전에 drop, `skipped_out_of_scope` 카운트 surface. **P2.1** `readCandidate` 가 dominant cwd 채택 (max-count + first-encounter tiebreak; B-2 해소). **P2.2** `read_transcript` summary 모드 3-stage fallback (sessions-index.json → `<session>-summary.jsonl` → compressor). **P3** `core/time.isoFromMs(ms)` 신설; `first_seen_at` 가 local-offset ISO 사용 (UTC `Z` 제거). +18 tests. ✅ spec + ✅ quality. |
+
+### 알려진 maintenance debt (non-blocking)
+- **dominant-cwd 알고리즘 중복** — `list-unprocessed-sessions.ts:415-456` 와 `core/transcript/extractor.ts:180-345` 에 같은 histogram + first-encounter tiebreak 로직. follow-up 추출 권장 (`pickDominantCwd(lines)` 헬퍼).
+- **`cwd_filter: []` (빈 배열) 테스트 부재** — 구현은 `length > 0` 으로 올바르게 처리하나 테스트 미커버.
+- **runner.ts 헤더 주석 드리프트** — INDEX 재빌드 추가 후 top-of-file overview 미갱신.
+- **§8.2 system prompt** 가 byte-exact 잠금이라 `cwd_filter` 사용을 시스템 프롬프트에서 직접 안내 불가. kickoff prompt 가 explicit JSON 으로 전달하므로 기능적으로는 OK.
 
 ## 작업 방식
 
