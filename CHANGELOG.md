@@ -6,11 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [Unreleased] — pre-release
+## [0.1.0] — 2026-04-27 (pre-release)
 
-> 25개 구현 task 중 22개 완료. 남은 항목: Task 20 (`harvest start` end-to-end
-> wiring), Task 22a (시나리오 픽스처), Task 22d (npm publish setup). 본
-> 엔트리는 첫 publish 시 `[0.1.0]` 으로 anchor 예정.
+> 25개 구현 task 모두 완료. npm 게시 직전 `package.json` 의 `repository` URL
+> 의 `<owner>/<repo>` placeholder 만 채우면 publish 가능. 본 엔트리가 첫
+> 공식 release 후보다.
 
 ### Added
 
@@ -52,10 +52,25 @@ All notable changes to this project will be documented in this file.
   - `record` — 실제 호출 + 녹화
 - **Agent 시스템 프롬프트** — `src/agent/system-prompt.ts`, `harvest.md` §8.2
   byte-exact verbatim (6254 chars).
-- **CLI surface** — argv 파서 (init / start / help / version 디스패치),
-  종료 코드 0–5 (정상/일반/입력/KB없음/Lock/LLM실패), 환경 변수
-  (`ANTHROPIC_API_KEY` / `HARVEST_MODEL` / `HARVEST_TRANSCRIPT_DIR` /
-  `HARVEST_DEBUG` / `HARVEST_TEST_LLM`).
+- **CLI surface** — argv 파서 (init / start / help / version 디스패치 +
+  `--recent N` / `--discover <path>` / `--since <ISO8601>` / `--model` /
+  `--dry-run` / `--verbose` / `--json`), 종료 코드 0–5 (정상/일반/입력/
+  KB없음/Lock/LLM실패), 환경 변수 (`ANTHROPIC_API_KEY` / `HARVEST_MODEL` /
+  `HARVEST_TRANSCRIPT_DIR` / `HARVEST_DEBUG` / `HARVEST_TEST_LLM`).
+- **`harvest start` end-to-end wiring** — `src/cli/start.ts` (KB chain
+  resolve, `--discover` walk, `--dry-run` short-circuit, SIGINT cleanup
+  `cleanupOnSignal` — `unlinkSync` lock + `writeFileSync` INDEX rebuild),
+  `src/agent/runner.ts` (per-KB sequential lock, lazy `query()` import,
+  kickoff prompt with `cwd_filter` + `discover_path`),
+  `src/agent/message-handler.ts` (§10.3 SDKMessage dispatcher).
+- **시나리오 픽스처 01** — `tests/fixtures/scenarios/01-single-kb-single-session/`
+  + `tests/scenarios/01-single-kb-single-session.test.ts`. JWT-refresh-loop
+  debugging 트랜스크립트로 EXTRACT validator 의 success / validator-rejection
+  branch 도달 가능성 검증. YAML-driven assertions.
+- **npm publish setup** — `package.json` (name `harvest-cli`, version
+  `0.1.0`, `bin`, `files`, `engines: node >=20`, `keywords`, `license: MIT`,
+  `prepublishOnly` gate), `LICENSE` (MIT), `.npmignore` (src/ tests/ 스펙
+  문서 제외).
 - **4-layer 아키텍처** — CLI → Agent → Tools → LLM → Core 단방향 import.
   `claudemd/` 는 `cli/` 의 peer (core 만 import). ESLint
   `no-restricted-paths` 가 빌드 타임 강제.
@@ -64,16 +79,18 @@ All notable changes to this project will be documented in this file.
 
 ### Tests
 
-- 400/400 단위 테스트 통과. typecheck / lint / build 전부 green.
+- 449/449 단위 테스트 통과. typecheck / lint / build 전부 green.
 - `byte-exact` verbatim slice 테스트로 spec 과 코드의 불일치를 즉시 감지.
+- 시나리오 01 (replay 모드, 3-run loop) 로 EXTRACT 의 success / failure 경로 양쪽 도달 가능성 입증.
 
 ### Known limitations
 
 - **`harvest start --dry-run` 의 완전한 단락 보장 안 됨** — 현재는 의도
   보고는 하지만 일부 쓰기를 완전히 단락하지 않을 수 있음. v2 후보.
 - **EXTRACT 50%-fail 1회 재시도 미구현** — `harvest.md` §18.6.3 에 명시되어
-  있으나 실 LLM failure rate 측정값이 부족. Task 22a 시나리오 픽스처가
-  record 모드로 측정 → 결정. (`SPEC_DEFECTS.md` I-8)
+  있으나 실 LLM 의 random noise 에 대한 retry 효과 검증은 record 모드 정기
+  통합 테스트에서만 가능. hand-authored replay 픽스처는 결정론적이라 retry
+  실효성 측정 불가. post-v1 결정. (`SPEC_DEFECTS.md` I-8)
 - **`--redact-secrets` 미지원** — transcript 의 토큰/키 패턴 마스킹 옵션은
   v2 후보. 현재는 사용자가 transcript 의 민감 정보를 인지하고 사용해야
   한다. (`harvest.md` §15.3)
