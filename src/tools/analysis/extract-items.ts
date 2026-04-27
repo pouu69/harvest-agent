@@ -536,9 +536,12 @@ function defaultLlmCaller(): LlmCaller {
         systemPrompt: args.systemPrompt,
         mcpServers: { extract: server },
         allowedTools: args.allowedTools,
-        // SDK-specific: disallow built-in tools so the LLM is forced to use
-        // emit_items and nothing else.
-        disallowedTools: [],
+        // §18.6 lines 3078–3079: builtin tools off (forces emit_items only),
+        // and a 2-turn cap on the LLM session to bound cost. Empty
+        // `disallowedTools` doesn't block anything; the load-bearing flag is
+        // `tools: []` which scopes the LLM to MCP tools only.
+        tools: [],
+        maxTurns: 2,
       } as unknown as Parameters<typeof sdk.unstable_v2_prompt>[1]);
 
       // Result shape: SDKResultMessage. On success, `usage` and

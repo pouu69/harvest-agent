@@ -122,6 +122,28 @@ export function nowIso(): string {
 
 **처리 방침**: Task 18 (MCP wrap) / Task 20 (`harvest start`) 시점에 `get_kb_state` 의 input 에 `cwd?` 추가하여 `findKbChain` 재사용. 또는 `defaultIsRoot` 가 `.git`/`$HOME` 경계를 mirror 하도록 보강. 후자가 더 작은 변경.
 
+### I-7. EXTRACT 사용자 프롬프트 메타 헤더: §18.6.1 ↔ §18.6.2 내부 모순
+
+**위치**:
+- §18.6.1 lines 3106–3108 — system prompt 에서 "transcript 는 `[transcript 메타]` 블록으로 시작 ... `[transcript 시작]` 마커 이후가 실제 대화"
+- §18.6.2 lines 3246–3259 — user prompt 빌더 템플릿은 `세션 메타:` + `# Transcript` 헤더 사용
+
+**문제**: 같은 §18.6 안에서 두 sub-section 이 다른 마커를 정의. system prompt 의 LLM 은 `[transcript 메타]` / `[transcript 시작]` 을 기대하지만 user prompt 빌더가 emit 하는 것은 `세션 메타:` / `# Transcript`. LLM 의 명시적 hint mismatch.
+
+**구현 결정**: Task 17 (`src/tools/analysis/extract-items.ts`, commit `2bc1fbd`) 은 §18.6.1 (system prompt 기준) 에 맞춰 `[transcript 메타]` / `[transcript 시작]` emit. system prompt 가 LLM 의 행동을 직접 가이드하므로 그쪽이 진실의 출처.
+
+**보정 권장**: §18.6.2 의 템플릿을 §18.6.1 의 마커로 통일.
+
+### I-8. EXTRACT 50% 실패 시 1회 재시도 (§18.6.3 line 3321) — 구현 deferred
+
+**위치**: §18.6.3 line 3321 — "50% 이상 실패 시 1회 재시도 (랜덤 노이즈 처리). 그래도 실패하면 도구가 `all_items_rejected` 에러 응답."
+
+**구현 현황**: Task 17 (`src/tools/analysis/extract-items.ts`) 은 retry 미구현. 100% 실패 시에만 `all_items_rejected` 즉시 반환. 50% 실패 시에는 그냥 valid 한 것만 success 로 반환.
+
+**영향도**: borderline 세션에서 valid 후보를 더 회수할 기회 손실. 비즈니스 임팩트 낮음 (사용자가 다음 run 에서 재시도 가능). 비용 (1 추가 LLM call) vs 회수 (50% retry 의 실측 효과 미상) 트레이드오프 불명.
+
+**처리 방침**: Phase 2 에서는 미구현 유지. Task 22a (시나리오 픽스처) 에서 50% 실패 케이스를 측정하여 retry 의 실효성 검증 후 결정.
+
 ### I-3. §7.3 INDEX.md 예시 ↔ §18.3 예시의 Status Summary 형태 불일치
 
 **위치**:
@@ -322,6 +344,18 @@ for await (const msg of query({
 ---
 
 ## 🟡 Style Trade-off (defensible deviation)
+
+### D-2. EXTRACT step 8: 비-AP severity 의 `present-and-non-null → drop` 정책 (vs spec 의 `delete raw.severity` silent strip)
+
+**위치**: §18.6.3 line 3302
+
+**스펙 원문**: "if (raw.category !== 'anti-pattern') delete raw.severity;" — silent 으로 필드 제거.
+
+**구현 결정**: Task 17 (`src/tools/analysis/extract-items.ts`) 은 비-AP 항목에 severity 가 명시적으로 들어왔을 경우 *항목 자체를 drop* (rejected_count++). 근거: silent mutation 은 LLM 의 prompt-following bug 를 *숨김*. drop 은 가시화하여 prompt 엔지니어링 / 모델 교체 시 신호로 활용.
+
+**영향도**: rejected_count 상한이 spec-faithful 구현보다 약간 높을 수 있음. valid 항목 손실은 없음 (어차피 spec 도 severity 무시이므로 다른 필드 영향 X).
+
+**보정 불필요** (의도적 deviation; 추후 해석 분기 시 spec 갱신 권장).
 
 ### D-1. §18.1 예시 yaml `tags: [a, b, c]` flow style
 

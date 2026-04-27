@@ -51,6 +51,9 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 - **🟡 I-4** `harvest start` 기본 스코프: §12.1 (cwd 기반) ↔ §9.3 (`~/.claude/projects/` 전수)
 - **🟡 I-5** `list_unprocessed_sessions.discover_path` 선언만 됐고 미구현 (Task 20 wiring 시점에 활성화)
 - **🟡 I-6** `is_root` 분기: `get_kb_chain` (boundary 존중) vs `get_kb_state` (filesystem root까지)
+- **🟡 I-7** EXTRACT 사용자 프롬프트 메타 헤더: §18.6.1 ↔ §18.6.2 마커 모순 (구현은 §18.6.1 따름)
+- **🟡 I-8** EXTRACT 50%-fail 1회 재시도 (§18.6.3 line 3321) 미구현 — Task 22a 측정 후 결정
+- **🟡 D-2** EXTRACT 비-AP severity present → drop (vs spec 의 silent strip; 의도적 deviation)
 - **🟢 S-1~S-3** v1.x 잔재 stale section reference (`§8.5.1`, `§8.6.1`, `§8.7`)
 - **🟢 S-5** §11.1 예시의 `trivial-deterministic` (v2.3 enum 단순화 미반영)
 - **🟢 S-6** §8 Playbook 의 유령 도구명 `demote_item` (catalog 는 `promote_item(direction)` 통합)
@@ -61,6 +64,13 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 - **🟡 D-1** §18.1 예시의 yaml flow style ↔ yaml@2 default block style
 
 새 task 진행 중 결함 발견 시 `SPEC_DEFECTS.md` 에 추가하고 prefix 별 ID 부여 (`B-`/`I-`/`S-`/`O-`/`D-`).
+
+### 사용자 design 제안 → [`DESIGN_PROPOSALS.md`](./DESIGN_PROPOSALS.md)
+
+spec 자체를 바꾸자는 제안 (SPEC_DEFECTS 와 별개로) 을 추적. 현재 등록:
+- **P-1** `harvest start --recent N` 옵션 → ✅ 수락 (Task 20 wiring).
+- **P-2** KB 항목 .md 압축 저장 → ❌ 반려 (현재 lazy-load + git review 패턴이 의도 달성).
+- **P-3** Frontmatter `paths` 제거 → 🟠 연기 (post-v1 재검토; spec 30%+ 영향).
 
 ---
 
