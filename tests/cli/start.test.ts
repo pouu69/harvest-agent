@@ -11,14 +11,15 @@
  *     query() / network call happens in this test.
  */
 
-import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { runStart } from "../../src/cli/start.js";
+import { cleanupOnSignal, runStart } from "../../src/cli/start.js";
+import type { KBChainEntry } from "../../src/core/types.js";
 
 let root: string;
 
@@ -217,3 +218,100 @@ describe("runStart — exit code propagation", () => {
 function captured0(): NodeJS.WritableStream {
   return new CapturedStream() as unknown as NodeJS.WritableStream;
 }
+
+// ---------------------------------------------------------------------------
+// SIGINT cleanup helpers — Task 20 follow-up (code review #1, #2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal KBChainEntry for `<root>/.harvest/`. The kb_path is the
+ * `.harvest/` dir itself (matches what resolveKbChain produces), so
+ * `<kb_path>/.lock` is the deterministic lock file path.
+ */
+function makeChainEntry(rootDir: string): KBChainEntry {
+  const kbPath = path.join(rootDir, ".harvest");
+  return {
+    kb_path: kbPath,
+    kb_dir: rootDir,
+    is_root: true,
+    depth_from_cwd: 0,
+    region_globs: [`${rootDir}/**/*`],
+    relative_to_cwd: ".",
+  };
+}
+
+describe("cleanupOnSignal — INDEX rebuild", () => {
+  it("synchronously writes INDEX.md for each KB in the chain", () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+
+    const entry = makeChainEntry(root);
+    const stderr = captured();
+
+    cleanupOnSignal({ kbChain: [entry], stderr });
+
+    const indexPath = path.join(root, ".harvest", "INDEX.md");
+    expect(existsSync(indexPath)).toBe(true);
+    const body = readFileSync(indexPath, "utf8");
+    // Sanity: the rendered INDEX always contains the heading.
+    expect(body).toMatch(/# Harvest Index/);
+  });
+});
+
+describe("cleanupOnSignal — lock cleanup", () => {
+  it("unlinks the `.lock` file at <kbPath>/.lock", () => {
+    const kbPath = path.join(root, ".harvest");
+    mkdirSync(kbPath, { recursive: true });
+    const lockPath = path.join(kbPath, ".lock");
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: 99999,
+        start_time: "2026-04-27T00:00:00Z",
+        command: "harvest start",
+        host: "test-host",
+      }),
+      "utf8",
+    );
+    expect(existsSync(lockPath)).toBe(true);
+
+    const entry = makeChainEntry(root);
+    const stderr = captured();
+    cleanupOnSignal({ kbChain: [entry], stderr });
+
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("does not throw when the lock file is already gone (ENOENT is benign)", () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const entry = makeChainEntry(root);
+    const stderr = captured();
+    expect(() =>
+      cleanupOnSignal({ kbChain: [entry], stderr }),
+    ).not.toThrow();
+  });
+});
+
+describe("runStart — --discover with empty result", () => {
+  it("emits a discover-specific error to stderr and exits 3", async () => {
+    // root has NO .harvest/ anywhere — discover yields empty chain.
+    const stdout = captured();
+    const stderr = captured();
+    const code = await runStart({
+      cwd: root,
+      discover: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout,
+      stderr,
+    });
+    expect(code).toBe(3);
+    const err = read(stderr);
+    expect(err).toMatch(/--discover/);
+    expect(err).toContain(root);
+    expect(err).toMatch(/no \.harvest\/ directories/);
+    // The cwd-only "Run `harvest init` first" hint should NOT appear when
+    // --discover was the user's explicit request.
+    expect(err).not.toMatch(/harvest init/);
+  });
+});

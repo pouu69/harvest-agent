@@ -33,12 +33,10 @@
  * This module is the entry point a user-typed command lands on.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import * as path from "node:path";
 
-import { acquireLock, releaseLock, type LockHandle } from "../core/lock.js";
 import { findKbChain, computeKbRegion } from "../core/kb/chain.js";
-import { atomicWrite } from "../core/atomic-write.js";
 import { buildIndexMarkdown } from "../core/kb/index-builder.js";
 import { nowIso } from "../core/time.js";
 import type { KBChainEntry } from "../core/types.js";
@@ -86,10 +84,18 @@ export async function runStart(opts: StartOptions): Promise<number> {
   // ---- 1. Resolve KB chain --------------------------------------------------
   const kbChain = resolveKbChain(opts);
   if (kbChain.length === 0) {
-    stderr.write(
-      "Error: no .harvest/ found in this directory or its parents.\n" +
-        "       Run `harvest init` first.\n",
-    );
+    if (opts.discover !== undefined) {
+      // The user asked us to look at a specific path; "Run `harvest init`"
+      // is the wrong hint here — the path simply contained no KBs.
+      stderr.write(
+        `Error: --discover ${opts.discover} found no .harvest/ directories.\n`,
+      );
+    } else {
+      stderr.write(
+        "Error: no .harvest/ found in this directory or its parents.\n" +
+          "       Run `harvest init` first.\n",
+      );
+    }
     return 3;
   }
 
@@ -266,19 +272,75 @@ interface SigintHandle {
   uninstall: () => void;
 }
 
+export interface CleanupOnSignalOptions {
+  kbChain: KBChainEntry[];
+  stderr: NodeJS.WritableStream;
+}
+
+/**
+ * Synchronous cleanup invoked from the SIGINT handler (and exposed for tests).
+ *
+ * For each KB in the chain:
+ *
+ *   1. **Lock**: directly `unlinkSync(<kb_path>/.lock)`. We do NOT call
+ *      `acquireLock` here — the runner is mid-loop holding the lock with
+ *      this same pid + host, so `acquireLock` would throw
+ *      `LockBlockedError("held_same_host")` and the lock would never be
+ *      removed. Since SIGINT means we are forcefully terminating *this*
+ *      process, the lock is unambiguously ours; unlink it directly. ENOENT
+ *      is benign (the runner's normal `finally` may have already released).
+ *
+ *   2. **INDEX**: rebuild and write `<kb_path>/INDEX.md` synchronously via
+ *      `writeFileSync`. We do not use `atomicWrite` (async) because the
+ *      caller `process.exit(130)`s immediately after this returns, and a
+ *      fire-and-forget promise would never resolve. On a signal-driven
+ *      exit, a partial `writeFileSync` is no worse than no write at all —
+ *      the next `harvest start` regenerates INDEX from scratch.
+ *
+ * Errors during INDEX rebuild are logged to stderr and swallowed so a
+ * problem with one KB doesn't prevent cleanup of the others.
+ */
+export function cleanupOnSignal(opts: CleanupOnSignalOptions): void {
+  const { kbChain, stderr } = opts;
+  for (const entry of kbChain) {
+    // ---- Lock cleanup: direct unlink, ENOENT is benign. ---------------------
+    const lockPath = path.join(entry.kb_path, ".lock");
+    try {
+      unlinkSync(lockPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "ENOENT") {
+        const msg = err instanceof Error ? err.message : String(err);
+        stderr.write(
+          `Warning: lock cleanup failed for ${lockPath}: ${msg}\n`,
+        );
+      }
+    }
+
+    // ---- INDEX rebuild: synchronous write so this completes before exit. ---
+    try {
+      const { content } = buildIndexMarkdown({
+        kbPath: entry.kb_path,
+        nowIso: nowIso(),
+      });
+      mkdirSync(entry.kb_path, { recursive: true });
+      writeFileSync(path.join(entry.kb_path, "INDEX.md"), content, "utf8");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      stderr.write(
+        `Warning: INDEX rebuild failed for ${entry.kb_path}: ${msg}\n`,
+      );
+    }
+  }
+}
+
 /**
  * Install a SIGINT handler that releases any locks we hold + rebuilds each
  * KB's INDEX, then exits 130. Returns an object with `uninstall()` so the
  * caller can detach the listener on normal completion.
  *
- * Since the runner manages its own locks (and releases them in finally),
- * this is mostly defensive. The locks list we capture here is the *KB
- * chain* — best-effort: if the runner already released, our acquireLock
- * call will simply succeed and we'll release it again.
- *
- * NOTE: we do NOT call `acquireLock` ourselves at install time. The runner
- * owns the locks during its loop. On SIGINT we just unlink any `.lock`
- * files in the chain that look like they belong to us (matching pid).
+ * The actual cleanup logic lives in {@link cleanupOnSignal} so it's directly
+ * unit-testable without firing real signals.
  */
 function installSigintHandler(
   kbChain: KBChainEntry[],
@@ -294,46 +356,7 @@ function installSigintHandler(
     handled = true;
     stderr.write("\n⚠️  중단 요청. cleanup 중...\n");
 
-    // Try to release any of our own locks. If we never acquired (runner is
-    // still in startup), this is a no-op.
-    for (const entry of kbChain) {
-      const lockPath = path.join(entry.kb_path, ".lock");
-      try {
-        // We don't have a LockHandle here, so use the lower-level unlink
-        // path: try acquiring, then releasing. If acquire blocks, skip —
-        // the lock belongs to the runner who is about to exit anyway.
-        if (existsSync(lockPath)) {
-          // Best-effort: if we can re-acquire, then it's stale (or ours);
-          // release cleanly. Otherwise the OS / runner cleanup will get it.
-          try {
-            const h = acquireLock(entry.kb_path, {
-              command: "harvest sigint cleanup",
-              nowIso: nowIso(),
-            });
-            releaseLock(h as LockHandle);
-          } catch {
-            // ignore
-          }
-        }
-      } catch {
-        // ignore — best-effort cleanup
-      }
-
-      // Rebuild INDEX so any committed work is visible. INDEX rebuild is
-      // pure-read of frontmatter + atomicWrite — safe even if some items
-      // are mid-write (they'll be picked up on the next harvest start).
-      try {
-        const { content } = buildIndexMarkdown({
-          kbPath: entry.kb_path,
-          nowIso: nowIso(),
-        });
-        // Fire-and-forget: don't await (we're in an exit path).
-        void atomicWrite(path.join(entry.kb_path, "INDEX.md"), content);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        stderr.write(`Warning: INDEX rebuild failed for ${entry.kb_path}: ${msg}\n`);
-      }
-    }
+    cleanupOnSignal({ kbChain, stderr });
 
     // §10.6: exit 130. Use process.exit because we want to bail RIGHT
     // NOW; the user is waiting on Ctrl+C feedback.
