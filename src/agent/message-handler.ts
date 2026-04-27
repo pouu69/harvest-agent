@@ -1,52 +1,63 @@
 /**
- * SDK message dispatcher per harvest.md §10.3.
+ * Step-event dispatcher per harvest.md §10.3.
  *
- * The Agent SDK's `query()` returns an async iterator of {@link SDKMessage}.
- * `runAgent` (Module B) consumes that iterator and feeds each message here.
- * This module is a *pure* dispatcher: no I/O of its own except the verbose-
- * mode lines it writes to a caller-provided `stderr` stream and the optional
- * `[debug] Agent initialized` marker emitted when `HARVEST_DEBUG` is set.
+ * # Why this exists
  *
- * Why we accept `SDKMessage` as `any` at the boundary instead of typing it
- * tightly: the SDK's `SDKMessage` is a 30-arm union (see `sdk.d.ts:2919`).
- * We only branch on a small set of `(type, subtype)` pairs and read a few
- * fields. Importing the full union here would force the rest of the runner
- * to over-type for no benefit. Tests pin down the actual shapes we depend on.
+ * `runAgent` (Module B) drives the LLM through `runAgentLoop` (Vercel AI
+ * SDK's `generateText` underneath). The loop emits a stream of normalized
+ * {@link StepEvent}s — one per step boundary — and we feed each event
+ * here. This module is a *pure* dispatcher: no I/O of its own except the
+ * verbose-mode lines it writes to a caller-provided `stderr` stream and
+ * the optional `[debug] Agent initialized` marker emitted when
+ * `HARVEST_DEBUG` is set.
  *
- * # Branches (per §10.3 lines 1836-1873)
+ * # Step union (PLAN_MULTI_PROVIDER §7 Phase 3)
  *
- * - `system.init`     → set `state.startedAt`, optional `[debug]` line.
- * - `system.status`   → verbose-only one-liner.
- * - `assistant`       → text blocks ignored (Agent's internal thoughts);
- *                       tool_use blocks logged in verbose with truncated
- *                       JSON args.
- * - `user` (tool result) → no print at all. `report_progress` already wrote
- *                          to stdout from the tool handler; surfacing the
- *                          envelope here would double-emit.
- * - `result`          → capture num_turns / total_cost_usd / subtype + endedAt.
- *                       Coarse tri-state: success | error_max_turns | error.
- *                       The runner reads `state` post-loop for exit-code
- *                       mapping.
+ * The old design accepted the Anthropic SDK's `SDKMessage` union directly
+ * (`system.init` / `assistant` / `user` / `result`). With the move to
+ * Vercel AI SDK we collapse those into four normalized events emitted by
+ * `runAgentLoop`:
  *
- * Everything else (compact_boundary, hooks, partial_assistant, etc.) is
- * silently ignored — these are status / housekeeping that a v1 CLI doesn't
- * need to surface.
+ *   | Event             | When emitted                                      |
+ *   |-------------------|---------------------------------------------------|
+ *   | `init`            | Synthesized once before the first step.           |
+ *   | `assistant_text`  | One per assistant text content block.             |
+ *   | `tool_call`       | One per tool call the model just made.            |
+ *   | `tool_result`     | One per tool execution result.                    |
+ *   | `finish`          | Once at the end of the run (with usage + reason). |
+ *
+ * `system.init` (legacy) maps onto our synthesized `init`.
+ * `system.compact_boundary` is dropped — AI SDK has no equivalent.
+ * `result.subtype` collapses into `finish.finishReason`.
+ *
+ * # finishReason → resultSubtype
+ *
+ * AI SDK normalizes `FinishReason` to one of `'stop' | 'length' |
+ * 'content-filter' | 'tool-calls' | 'error' | 'other' | 'unknown'`. We map:
+ *
+ *   - `'stop'`        → `'success'` (model ended cleanly)
+ *   - `'tool-calls'`  → `'error_max_turns'` (the loop hit `stopWhen` while
+ *                       the model still wanted to call tools — equivalent
+ *                       to the legacy `error_max_turns`)
+ *   - everything else → `'error'`
  */
 
 export interface RunState {
-  /** ms since epoch, set on `system.init`. */
+  /** ms since epoch, set on `init`. */
   startedAt?: number;
-  /** ms since epoch, set on `result`. */
+  /** ms since epoch, set on `finish`. */
   endedAt?: number;
-  /** Number of model turns the SDK reported on the result. */
+  /** Number of model turns (steps) the loop reported. */
   numTurns?: number;
-  /** Cost in USD reported on the result. */
+  /** Cost in USD reported by the loop. AI SDK doesn't normalize cost
+   *  across providers in v6 — currently always 0; reserved for a future
+   *  per-provider price helper. */
   totalCostUsd?: number;
-  /** Coarse tri-state derived from the SDK's result subtype. */
+  /** Coarse tri-state derived from {@link FinishReason}. */
   resultSubtype?: "success" | "error_max_turns" | "error";
 }
 
-export interface HandleMessageOptions {
+export interface HandleStepOptions {
   /** Toggle verbose console.error logging. */
   verbose?: boolean;
   /** Where to write verbose / debug lines. Default: process.stderr. */
@@ -54,95 +65,130 @@ export interface HandleMessageOptions {
 }
 
 /**
- * Process one SDK message. Mutates `state` in place and (in verbose mode)
- * writes a one-line summary to `opts.stderr`. Never throws on shape
- * mismatches — unrecognized messages are silently dropped.
+ * The seven AI SDK finish reasons we surface in `finish` events. Loosely
+ * typed (`string`) on the input to `handleStep` so providers / SDK
+ * versions can introduce new variants without immediately breaking us.
  */
-export function handleMessage(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  msg: any,
+export type FinishReason =
+  | "stop"
+  | "length"
+  | "content-filter"
+  | "tool-calls"
+  | "error"
+  | "other"
+  | "unknown";
+
+export type StepEvent =
+  | { type: "init"; sessionId?: string }
+  | { type: "assistant_text"; text: string }
+  | {
+      type: "tool_call";
+      toolName: string;
+      input: unknown;
+      toolCallId?: string;
+    }
+  | {
+      type: "tool_result";
+      toolName: string;
+      output: unknown;
+      toolCallId?: string;
+    }
+  | {
+      type: "finish";
+      finishReason: string;
+      usage?: {
+        inputTokens?: number | undefined;
+        outputTokens?: number | undefined;
+      };
+      numSteps?: number;
+      /**
+       * Optional per-provider cost. Currently always undefined → coerced
+       * to 0 in {@link RunState.totalCostUsd}.
+       */
+      totalCostUsd?: number;
+    };
+
+/**
+ * Process one normalized step event. Mutates `state` in place and (in
+ * verbose mode) writes a one-line summary to `opts.stderr`. Never throws
+ * on shape mismatches — unrecognized events are silently dropped.
+ */
+export function handleStep(
+  event: StepEvent | unknown,
   state: RunState,
-  opts: HandleMessageOptions = {},
+  opts: HandleStepOptions = {},
 ): void {
   const stderr = opts.stderr ?? process.stderr;
   const verbose = opts.verbose === true;
 
-  if (msg === null || typeof msg !== "object" || typeof msg.type !== "string") {
+  if (
+    event === null ||
+    typeof event !== "object" ||
+    typeof (event as { type?: unknown }).type !== "string"
+  ) {
     return;
   }
 
-  switch (msg.type) {
-    case "system": {
-      if (msg.subtype === "init") {
-        state.startedAt = Date.now();
-        if (process.env.HARVEST_DEBUG) {
-          stderr.write("[debug] Agent initialized\n");
-        }
-      } else if (msg.subtype === "status" && verbose) {
-        const status = typeof msg.status === "string" ? msg.status : "?";
-        stderr.write(`[status] ${status}\n`);
+  const e = event as StepEvent;
+
+  switch (e.type) {
+    case "init": {
+      state.startedAt = Date.now();
+      if (process.env.HARVEST_DEBUG) {
+        stderr.write("[debug] Agent initialized\n");
       }
-      // Other system subtypes (compact_boundary, task_*, etc.) are ignored.
       return;
     }
 
-    case "assistant": {
-      // Only verbose mode is interesting. Non-verbose discards the entire
-      // assistant turn — text is internal reasoning, tool_use will be
-      // followed by a tool_result turn we also drop.
+    case "assistant_text": {
+      // Internal reasoning. Not user-facing even in verbose — the verbose
+      // line for tool_call is enough signal.
+      return;
+    }
+
+    case "tool_call": {
       if (!verbose) return;
-      const blocks = msg.message?.content;
-      if (!Array.isArray(blocks)) return;
-      for (const block of blocks) {
-        if (block?.type === "tool_use") {
-          const name = String(block.name ?? "?");
-          const args = truncate(safeStringify(block.input ?? {}), 80);
-          stderr.write(`[tool] ${name}(${args})\n`);
-        }
-        // text blocks: ignore even in verbose. The Agent's chain-of-thought
-        // is not user-facing.
-      }
+      const name = String(e.toolName ?? "?");
+      const args = truncate(safeStringify(e.input ?? {}), 80);
+      stderr.write(`[tool] ${name}(${args})\n`);
       return;
     }
 
-    case "user": {
-      // Tool result messages flow through here. `report_progress`'s tool
-      // handler already wrote its line to the user's stdout, so a second
-      // print here would double-emit. Other tools' results are also not
-      // surfaced — verbose users see the preceding tool_use line, which is
-      // enough to know what's happening.
+    case "tool_result": {
+      // `report_progress`'s tool already wrote to stdout; surfacing the
+      // envelope here would double-emit. Other tools' results are also
+      // not surfaced — the preceding `tool_call` line is sufficient.
       return;
     }
 
-    case "result": {
+    case "finish": {
       state.endedAt = Date.now();
-      if (typeof msg.num_turns === "number") {
-        state.numTurns = msg.num_turns;
+      if (typeof e.numSteps === "number") {
+        state.numTurns = e.numSteps;
       }
-      // Spec §10.3 line 1867: missing total_cost_usd defaults to 0.
       state.totalCostUsd =
-        typeof msg.total_cost_usd === "number" ? msg.total_cost_usd : 0;
-      state.resultSubtype = mapResultSubtype(msg.subtype);
+        typeof e.totalCostUsd === "number" ? e.totalCostUsd : 0;
+      state.resultSubtype = mapFinishReason(e.finishReason);
       return;
     }
 
     default:
-      // Unknown / future message types. Silently ignored.
       return;
   }
 }
 
 /**
- * Map the SDK's fine-grained result subtype to the coarse tri-state we
- * surface to exit-code mapping. The SDK's error subtypes (error_during_
- * execution, error_max_budget_usd, error_max_structured_output_retries)
- * all collapse to "error" — only `error_max_turns` is special-cased
- * because §10.5 calls it out explicitly (partial-results-still-committed
- * semantic; CLI may want to flag it differently in the summary line).
+ * Map AI SDK `FinishReason` (loose string) to the coarse tri-state we
+ * surface to exit-code mapping.
+ *
+ *   - `'stop'`       → `'success'`
+ *   - `'tool-calls'` → `'error_max_turns'`  (model still wanted to call
+ *                     tools; the loop hit `stopWhen`)
+ *   - anything else  → `'error'`
  */
-function mapResultSubtype(subtype: unknown): RunState["resultSubtype"] {
-  if (subtype === "success") return "success";
-  if (subtype === "error_max_turns") return "error_max_turns";
+function mapFinishReason(reason: unknown): RunState["resultSubtype"] {
+  if (reason === "stop") return "success";
+  if (reason === "tool-calls") return "error_max_turns";
   return "error";
 }
 
@@ -152,9 +198,9 @@ function truncate(s: string, max: number): string {
 }
 
 /**
- * `JSON.stringify` that never throws. Cycles / BigInts / unsupported types
- * fall back to a placeholder so a malformed tool input never crashes the
- * dispatcher.
+ * `JSON.stringify` that never throws. Cycles / BigInts / unsupported
+ * types fall back to a placeholder so a malformed tool input never
+ * crashes the dispatcher.
  */
 function safeStringify(v: unknown): string {
   try {

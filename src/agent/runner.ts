@@ -5,38 +5,37 @@
  *
  *   1. **Lock** — for every entry in `kbChain`, acquire `<kb>/.lock` exclusive
  *      (§11.4 via `core/lock.ts`). On `LockBlockedError` we exit with code 4
- *      (§12.2). Locks are released in `finally` even when `query()` throws.
+ *      (§12.2). Locks are released in `finally` even when the loop throws.
  *
- *   2. **MCP server** — built via `createHarvestServer(deps)` and handed to
- *      `query()` as `mcpServers: { harvest: server }`. The deps surface
- *      threads the LLM caller (for `extract_items_from_transcript`) and a
- *      transcript-dir override down to the tools.
+ *   2. **Tools** — the 13 in-process tool implementations are registered
+ *      as a Vercel AI SDK `ToolSet` via `buildHarvestTools(deps)`. The deps
+ *      surface threads the LLM caller (for `extract_items_from_transcript`)
+ *      and a transcript-dir override down to the tools.
  *
- *   3. **`query()`** — the SDK entrypoint, lazy-imported so unit tests can
- *      run without loading the SDK. Tests inject a fake via `opts.query`.
+ *   3. **`runAgentLoop`** — the AI SDK driver, lazy-imported so unit tests
+ *      can run without loading `ai` from `node_modules`. Tests inject a fake
+ *      via `opts.runLoop`.
  *
- *   4. **Message dispatcher** — each message yielded by `query()` is fed to
- *      `handleMessage` (Module C), which mutates a {@link RunState}. Post-
- *      loop, the runner reads the state to decide the exit code.
+ *   4. **Step dispatcher** — each {@link StepEvent} emitted by the loop is
+ *      fed to `handleStep` (Module C), which mutates a {@link RunState}.
+ *      Post-loop, the runner reads the state to decide the exit code.
  *
  * # Exit codes (§12.2)
  *
- *   - 0  : `result.subtype === "success"`
- *   - 1  : any other `result.subtype` (incl. `error_max_turns`)
+ *   - 0  : `state.resultSubtype === "success"` (finishReason === 'stop')
+ *   - 1  : any other resultSubtype (incl. `error_max_turns`)
  *   - 4  : `LockBlockedError` while acquiring locks
- *   - 5  : exception thrown by `query()` (network / auth) or by stream
- *          iteration. Per §10.5, these are "Agent SDK self-errors → exit 5".
+ *   - 5  : exception thrown by the loop (network / auth / provider self
+ *          error). Per §10.5, these are "LLM provider self-errors → exit 5"
+ *          (PLAN_MULTI_PROVIDER §1 generalization of the legacy "Agent SDK
+ *          self-error" wording).
  *
  * # SPEC_DEFECTS resolved here
  *
  *   - **I-4** (`harvest start` scope drift between §12.1 and §9.3): the
  *     runner builds an explicit array of KB-owning directories (the
  *     `kb_dir` of every chain entry) and surfaces it as `cwd_filter` in the
- *     kickoff prompt context. Tools that scan transcripts can later filter
- *     by this list. The message itself is informational; the actual scoping
- *     happens because the agent passes `cwd_filter` (or `discover_path`)
- *     through to `list_unprocessed_sessions`.
- *
+ *     kickoff prompt context.
  *   - **I-5** (`discover_path` declared-but-unused): wired through
  *     `opts.discover` → kickoff prompt context → agent → tool.
  *
@@ -60,26 +59,26 @@ import {
 import { nowIso as defaultNowIso } from "../core/time.js";
 import type { KBChainEntry } from "../core/types.js";
 import { type LlmCaller, type LlmCallerMode } from "../llm/caller.js";
+import type { Provider } from "../llm/providers/index.js";
 import { selectLlmCaller } from "../llm/select.js";
+
 import {
-  createHarvestServer,
-  HARVEST_TOOL_NAMES,
-  type HarvestServerDeps,
-} from "../tools/server.js";
-
-import { handleMessage, type RunState } from "./message-handler.js";
+  runAgentLoop,
+  type RunAgentLoopOptions,
+  type RunAgentLoopResult,
+} from "./loop.js";
+import { handleStep, type RunState, type StepEvent } from "./message-handler.js";
 import { AGENT_SYSTEM_PROMPT } from "./system-prompt.js";
-
-// Type-only import: keeps the runtime dependency lazy (production callers
-// import `query` at the top of the loop body, not here).
-import type {
-  query as QueryFn,
-  McpSdkServerConfigWithInstance,
-} from "@anthropic-ai/claude-agent-sdk";
+import {
+  buildHarvestTools,
+  type HarvestToolsDeps,
+} from "./tool-registry.js";
 
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
+
+export type RunLoopFn = (opts: RunAgentLoopOptions) => Promise<RunAgentLoopResult>;
 
 export interface RunAgentOptions {
   /** KB chain to operate on (one entry per KB; first = current cwd's KB; rest
@@ -91,22 +90,22 @@ export interface RunAgentOptions {
   /** Mode for LLM calls in `extract_items_from_transcript` and other LLM-
    *  using tools. Default: env `HARVEST_TEST_LLM` → `"live"`. */
   llmMode?: LlmCallerMode;
-  /** Override model name for the Agent. Default: env `HARVEST_MODEL` →
-   *  `"claude-sonnet-4-6"` (per §10.1; SPEC_DEFECTS I-1 prefers the
-   *  explicit version). */
+  /** Active LLM provider for the agent loop. Default: parsed from
+   *  `HARVEST_PROVIDER` env (→ `anthropic`). */
+  provider?: Provider;
+  /** Override model name. Default: parsed via provider's default. */
   model?: string;
-  /** Hard turn cap. Default: 300 (§10.1). */
+  /** Hard step cap. Default: 300 (§10.1). */
   maxTurns?: number;
-  /** Inject the SDK `query` function for tests. Default: lazy-import the
-   *  real one. */
-  query?: typeof QueryFn;
+  /** Inject the agent loop function for tests. Default: real
+   *  `runAgentLoop` from `loop.ts`. */
+  runLoop?: RunLoopFn;
   /** Inject the LlmCaller (for the secondary-LLM tool). Default: dispatched
    *  via `selectLlmCaller(llmMode)`. */
   llmCaller?: LlmCaller;
-  /** Inject the MCP server factory (for tests). Default: `createHarvestServer`. */
-  serverFactory?: (deps: HarvestServerDeps) => McpSdkServerConfigWithInstance;
-  /** Optional: passed-through `--recent N` for filtering. Surfaces in the
-   *  kickoff prompt; the agent forwards to `list_unprocessed_sessions.limit`. */
+  /** Inject the tool builder (for tests). Default: `buildHarvestTools`. */
+  toolBuilder?: (deps: HarvestToolsDeps) => ReturnType<typeof buildHarvestTools>;
+  /** Optional: passed-through `--recent N` for filtering. */
   recent?: number;
   /** Optional: passed-through `--since` ISO8601. */
   since?: string;
@@ -127,14 +126,13 @@ export interface RunAgentOptions {
   nowIso?: () => string;
   /**
    * Test seam for INDEX rebuild on normal termination. Defaults to the real
-   * `buildIndexMarkdown` from `core/kb/index-builder.ts`. Tests pass a fake
-   * to assert call shape / inject failures without touching the filesystem.
+   * `buildIndexMarkdown` from `core/kb/index-builder.ts`.
    */
   buildIndexFn?: typeof buildIndexMarkdown;
 }
 
 export interface RunAgentResult {
-  /** §12.2: 0 ok, 1 generic, 4 lock, 5 LLM/SDK. */
+  /** §12.2: 0 ok, 1 generic, 4 lock, 5 LLM provider self-error. */
   exitCode: 0 | 1 | 4 | 5;
   numTurns?: number;
   totalCostUsd?: number;
@@ -147,7 +145,6 @@ export interface RunAgentResult {
 // -----------------------------------------------------------------------------
 
 const DEFAULT_MAX_TURNS = 300;
-const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 /**
  * Run the Harvest Agent over the given KB chain.
@@ -165,10 +162,6 @@ export async function runAgent(
   const verbose = opts.verbose === true;
 
   // ---- 1. Acquire locks for every KB in the chain --------------------------
-  //
-  // We lock them in chain order (closest → farthest). On any single failure
-  // we release everything we've already grabbed and return exit 4. This is
-  // the §11.4 contract: "all-or-nothing" per harvest run.
   const handles: LockHandle[] = [];
   try {
     for (const entry of opts.kbChain) {
@@ -184,7 +177,6 @@ export async function runAgent(
             `Error: lock at ${err.lockFilePath} is held (${err.reason}). ` +
               `Another harvest run is in progress, or a previous run did not clean up.\n`,
           );
-          // Best-effort release of any locks we already acquired.
           releaseAllSafe(handles, stderr);
           return { exitCode: 4 };
         }
@@ -192,30 +184,22 @@ export async function runAgent(
       }
     }
 
-    // ---- 2. Build the MCP server with deps -------------------------------
+    // ---- 2. Build the tool set with deps ---------------------------------
     const llmCaller =
       opts.llmCaller ?? selectLlmCaller(opts.llmMode);
 
-    const serverDeps: HarvestServerDeps = { llmCaller };
-    if (opts.transcriptDir !== undefined) serverDeps.transcriptDir = opts.transcriptDir;
-    if (opts.stdout !== undefined) serverDeps.progressStdout = opts.stdout;
-    if (opts.nowIso !== undefined) serverDeps.nowIso = opts.nowIso;
+    const toolDeps: HarvestToolsDeps = { llmCaller };
+    if (opts.transcriptDir !== undefined) toolDeps.transcriptDir = opts.transcriptDir;
+    if (opts.stdout !== undefined) toolDeps.progressStdout = opts.stdout;
+    if (opts.nowIso !== undefined) toolDeps.nowIso = opts.nowIso;
 
-    const factory = opts.serverFactory ?? createHarvestServer;
-    const server = factory(serverDeps);
+    const buildTools = opts.toolBuilder ?? buildHarvestTools;
+    const tools = buildTools(toolDeps);
 
-    // ---- 3. Resolve query() ----------------------------------------------
-    //
-    // Lazy-import the real SDK only when no test override was provided. This
-    // keeps unit tests (which always inject a fake) free of the SDK's load
-    // cost.
-    const queryFn = opts.query ?? (await loadRealQuery());
+    // ---- 3. Resolve runAgentLoop -----------------------------------------
+    const runLoop = opts.runLoop ?? runAgentLoop;
 
     // ---- 4. Build the kickoff prompt -------------------------------------
-    //
-    // The agent uses `cwd_filter` to scope `list_unprocessed_sessions` to
-    // the actual KBs in this chain (resolves SPEC_DEFECTS I-4). When
-    // `--discover` is given, we pass that through instead.
     const cwdFilter = opts.kbChain.map((e) => e.kb_dir);
     const kickoff = buildKickoffPrompt({
       cwdFilter,
@@ -225,57 +209,34 @@ export async function runAgent(
       dryRun: opts.dryRun === true,
     });
 
-    // ---- 5. Run the SDK loop ---------------------------------------------
+    // ---- 5. Run the agent loop -------------------------------------------
     const state: RunState = {};
-    const queryOptions: Record<string, unknown> = {
-      systemPrompt: AGENT_SYSTEM_PROMPT,
-      mcpServers: { harvest: server },
-      allowedTools: [...HARVEST_TOOL_NAMES],
-      // Disable all built-in SDK tools; harvest exposes only its 13 (§10.1).
-      tools: [],
-      maxTurns: opts.maxTurns ?? DEFAULT_MAX_TURNS,
-      model: opts.model ?? process.env["HARVEST_MODEL"] ?? DEFAULT_MODEL,
-      permissionMode: "bypassPermissions",
-      settingSources: [],
+    const onStep = (event: StepEvent): void => {
+      handleStep(event, state, { verbose, stderr });
     };
 
-    let sdkSelfError = false;
+    let providerSelfError = false;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const stream = (queryFn as any)({
+      const loopOpts: RunAgentLoopOptions = {
+        system: AGENT_SYSTEM_PROMPT,
         prompt: kickoff,
-        options: queryOptions,
-      });
+        tools,
+        maxSteps: opts.maxTurns ?? DEFAULT_MAX_TURNS,
+        onStep,
+      };
+      if (opts.provider !== undefined) loopOpts.provider = opts.provider;
+      if (opts.model !== undefined) loopOpts.model = opts.model;
 
-      // The SDK returns a Query that is itself an async iterable. We consume
-      // it with `for await ... of` — works for either an iterable or an
-      // iterator. Errors thrown synchronously by `query()` (auth misconfig,
-      // option validation) bubble up here; errors thrown mid-stream bubble
-      // out of the for-await.
-      for await (const msg of stream as AsyncIterable<unknown>) {
-        handleMessage(msg, state, { verbose, stderr });
-      }
+      await runLoop(loopOpts);
     } catch (err) {
-      // §10.5: Agent SDK self-error → exit 5. Lock release + INDEX rebuild
-      // both happen below before we return.
+      // §10.5 (generalized): LLM provider self-error → exit 5. Lock release
+      // + INDEX rebuild both still happen below.
       const message = err instanceof Error ? err.message : String(err);
       stderr.write(`Error: agent run failed: ${message}\n`);
-      sdkSelfError = true;
+      providerSelfError = true;
     }
 
     // ---- 6. Rebuild INDEX for each KB (§8.6) ----------------------------
-    //
-    // All non-lock termination paths (success / max_turns / non-fatal error /
-    // SDK self-error) must rebuild INDEX so the next Claude Code session
-    // sees a fresh view of the per-KB items the tools just wrote. We do
-    // this BEFORE the outer finally releases the locks, so we still hold
-    // exclusive write rights on each KB.
-    //
-    // Per-KB errors are logged to stderr and swallowed — a problem with one
-    // KB must not abort the rebuild of the others, and the agent's run
-    // itself already either succeeded or failed independently of INDEX
-    // freshness. (The Ctrl+C path lives in `cli/start.ts:cleanupOnSignal`,
-    // which has the same per-KB-isolated error policy.)
     rebuildIndexes({
       kbChain: opts.kbChain,
       buildIndexFn: opts.buildIndexFn ?? buildIndexMarkdown,
@@ -283,7 +244,7 @@ export async function runAgent(
       stderr,
     });
 
-    if (sdkSelfError) {
+    if (providerSelfError) {
       return { exitCode: 5 };
     }
 
@@ -294,9 +255,6 @@ export async function runAgent(
     if (state.numTurns !== undefined) result.numTurns = state.numTurns;
     if (state.totalCostUsd !== undefined) result.totalCostUsd = state.totalCostUsd;
     if (state.resultSubtype !== undefined) result.resultSubtype = state.resultSubtype;
-    // Suppress unused-warning: stdout is intentionally NOT used here. The
-    // tools (esp. `report_progress`) write directly to it; the runner stays
-    // out of the way so we don't double-emit.
     void stdout;
     return result;
   } finally {
@@ -309,10 +267,10 @@ export async function runAgent(
 // -----------------------------------------------------------------------------
 
 /**
- * Build the kickoff message handed to `query()`. We deliberately keep this
- * short — the system prompt §8.2 already establishes the agent's identity
- * and methodology. The kickoff is just runtime context (which KBs to scope
- * to, optional filters).
+ * Build the kickoff message handed to the agent loop. We deliberately keep
+ * this short — the system prompt §8.2 already establishes the agent's
+ * identity and methodology. The kickoff is just runtime context (which KBs
+ * to scope to, optional filters).
  */
 export function buildKickoffPrompt(args: {
   cwdFilter: string[];
@@ -326,14 +284,8 @@ export function buildKickoffPrompt(args: {
   lines.push("");
   lines.push("# 실행 컨텍스트");
   if (args.discover !== undefined) {
-    // I-5: when --discover is given, it overrides cwd-based scoping. The
-    // agent should pass `discover_path: <discover>` to
-    // list_unprocessed_sessions instead of `cwd_filter`.
     lines.push(`- discover_path: ${args.discover}`);
   } else {
-    // I-4: explicit cwd_filter so the agent knows which KB regions are in
-    // scope for this run. The agent passes one of these (or nothing, if the
-    // tool's default suffices) into list_unprocessed_sessions.
     lines.push(`- cwd_filter: ${JSON.stringify(args.cwdFilter)}`);
   }
   if (args.recent !== undefined) {
@@ -349,13 +301,10 @@ export function buildKickoffPrompt(args: {
 }
 
 /**
- * Rebuild INDEX.md for every KB in the chain, writing the file synchronously
- * so we don't race the lock release in the outer `finally`. Per-KB errors
- * are logged to stderr and swallowed — one bad KB must not block the others.
- *
- * Mirrors the §8.6 contract on the normal-termination path; the SIGINT path
- * uses {@link cleanupOnSignal} in `cli/start.ts` (which is sync-by-necessity
- * because the handler `process.exit(130)`s right after).
+ * Rebuild INDEX.md for every KB in the chain, writing the file
+ * synchronously so we don't race the lock release in the outer `finally`.
+ * Per-KB errors are logged to stderr and swallowed — one bad KB must not
+ * block the others.
  */
 function rebuildIndexes(args: {
   kbChain: KBChainEntry[];
@@ -385,9 +334,6 @@ function releaseAllSafe(
   handles: LockHandle[],
   stderr: NodeJS.WritableStream,
 ): void {
-  // Release in reverse order of acquisition. Errors during release are
-  // logged but do not block the loop — a partial release is still better
-  // than aborting the whole cleanup.
   for (let i = handles.length - 1; i >= 0; i--) {
     try {
       releaseLock(handles[i]!);
@@ -398,14 +344,4 @@ function releaseAllSafe(
       );
     }
   }
-}
-
-/**
- * Lazy-import the real SDK `query`. Wrapped so we can `await` from the
- * caller. Failure here means the SDK isn't installed — the runner can't
- * recover, so let it bubble (controller turns it into a generic exit 1).
- */
-async function loadRealQuery(): Promise<typeof QueryFn> {
-  const mod = await import("@anthropic-ai/claude-agent-sdk");
-  return mod.query;
 }

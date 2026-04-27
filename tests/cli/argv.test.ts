@@ -195,4 +195,34 @@ describe("parseArgs", () => {
       expect((err as ArgvParseError).exitCode).toBe(2);
     }
   });
+
+  describe("--provider (PLAN_MULTI_PROVIDER §6)", () => {
+    it("accepts each of the three supported providers", () => {
+      for (const p of ["anthropic", "openai", "google"] as const) {
+        const r = run("start", "--provider", p);
+        expect(r.flags.provider).toBe(p);
+      }
+    });
+
+    it("throws when --provider is missing a value", () => {
+      expect(() => run("start", "--provider")).toThrow(/--provider requires/);
+    });
+
+    it("throws when --provider value is unknown", () => {
+      expect(() => run("start", "--provider", "bedrock")).toThrow(
+        /must be one of/,
+      );
+    });
+
+    it("throws when --provider value starts with '-'", () => {
+      expect(() => run("start", "--provider", "--verbose")).toThrow(
+        /--provider requires/,
+      );
+    });
+
+    it("treats --provider as a start flag (still parses init unaffected)", () => {
+      const r = run("init", "--root");
+      expect(r.flags.provider).toBeUndefined();
+    });
+  });
 });

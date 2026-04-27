@@ -1,349 +1,266 @@
 # Harvest
 
-> **Harvest** 는 Claude Code 세션의 휘발성 지식을, 사용자가 주기적으로 수확하여 *농축된 영속 KB(Knowledge Base)* 로 만드는 TypeScript CLI 도구이다.
+> **Harvest** 는 Claude Code 세션의 휘발성 지식을 *농축된 영속 KB(Knowledge Base)* 로 만들어 다음 세션에 자동 주입하는 TypeScript CLI 도구이다.
 
 [![status: pre-release](https://img.shields.io/badge/status-pre--release-orange)]()
 [![node: 20+](https://img.shields.io/badge/node-20+-brightgreen)]()
-[![tests: 400/400](https://img.shields.io/badge/tests-400%2F400-brightgreen)]()
 
 ---
 
-## 무슨 문제를 푸나
+## 무엇을 위한 도구인가
 
-Claude Code 세션은 매번 휘발된다. 한 세션에서 다음과 같은 가치 있는 지식이 발생하지만 다음 세션에 전달되지 않는다.
+Claude Code 세션은 매번 휘발된다. 한 세션에서 발생한 다음과 같은 가치 있는 지식이 다음 세션에 전달되지 못한다.
 
 - **결정(Decisions)** — 왜 이 라이브러리를 골랐는가, 왜 이 아키텍처인가
 - **학습(Learnings)** — 새롭게 발견한 패턴, 트릭, 도구 사용법
 - **재사용 자산(Reusable)** — 다른 프로젝트에서도 쓸 만한 스니펫/접근법
 - **반복하면 안 되는 실수(Anti-patterns)** — 시행착오로 알게 된 함정
 
-이것들은 휘발될 뿐 아니라, 다음 세션에서 *같은 실수* 가 반복되거나 *이미 내린 결정* 을 다시 고민하게 만든다.
+결과적으로 같은 실수가 반복되거나 이미 내린 결정을 다시 고민하게 된다.
 
-Harvest 는 사용자가 명시적으로 `harvest start` 를 실행할 때 미처리 transcript 들을 분석하여, 위 4 카테고리 KB 에 항목을 *만들고 / 머지하고 / 폐기하는* 도구이다. 결과는 평문 마크다운으로 `.harvest/` 아래 저장되고, `CLAUDE.md` 의 `@`-import 한 줄을 통해 다음 세션에 자동 주입된다.
-
----
-
-## 어떻게 동작하나
+Harvest 는 사용자가 `harvest start` 를 실행하면 미처리 transcript 들을 분석하여, 위 4 카테고리 KB 에 항목을 *만들고 / 머지하고 / 폐기한다*. 결과물은 평문 마크다운으로 `.harvest/` 아래 저장되고, `CLAUDE.md` 의 `@`-import 한 줄을 통해 다음 세션에 자동 주입된다.
 
 ```
-┌────────────────────┐    ┌─────────────────────┐    ┌──────────────────────┐
-│  harvest init      │ →  │  Claude Code 세션   │ →  │  harvest start       │
-│  (KB 폴더 생성)    │    │  (transcript 누적)  │    │  (Agent 가 분석/수확)│
-└────────────────────┘    └─────────────────────┘    └──────────────────────┘
+┌──────────────────┐    ┌────────────────────┐    ┌──────────────────────┐
+│  harvest init    │ →  │  Claude Code 세션  │ →  │  harvest start       │
+│  (KB 폴더 생성)  │    │  (transcript 누적) │    │  (Agent 가 분석/수확)│
+└──────────────────┘    └────────────────────┘    └──────────────────────┘
                                                               │
                                                               ▼
                           ┌──────────────────────────────────────┐
-                          │  .harvest/INDEX.md + items/*.md       │
-                          │  → CLAUDE.md @-import 으로 다음 세션  │
-                          │     자동 주입                          │
+                          │  .harvest/INDEX.md + items/*.md      │
+                          │  → CLAUDE.md @-import 으로 다음 세션 │
+                          │     자동 주입                        │
                           └──────────────────────────────────────┘
 ```
 
-1. **`harvest init`** — 프로젝트 루트(또는 모노레포의 각 워크스페이스) 에 `.harvest/` 를 만들고, `CLAUDE.md` 에 `@.harvest/INDEX.md` import 한 줄을 (마커 블록으로 감싸서) 넣는다.
-2. **Claude Code 세션** — 평소처럼 작업한다. transcript 가 `~/.claude/projects/` 에 쌓인다.
-3. **`harvest start`** — Agent 가 미처리 transcript 들을 읽어 → 적합한 KB 로 라우팅 → 항목을 추출 → 기존 KB 와 머지/supersede/archive 하고, INDEX 를 재빌드한다. LLM 호출은 좁은 출구 (extract / similarity tie-break) 에서만.
-4. **다음 세션** — Claude Code 가 launch 시 `CLAUDE.md` 의 `@`-import 를 따라 INDEX 를 자동 로드. 작업 중 필요한 항목 .md 만 lazy 로 Read.
+---
 
-### 핵심 설계 원칙 (harvest.md §2)
+## 특징
 
-- **격리(Isolation)** — 자식 KB 의 지식이 root KB 로 새지 않도록, 신규 항목은 가장 구체적인 KB 에 둔다.
-- **농축(Concentration)** — KB 는 *클수록* 좋은 게 아니라 *작고 정확할수록* 좋다. 머지/eviction 우선, 신규 작성은 마지막 수단.
-- **멱등성(Idempotency)** — `harvest start` 를 두 번 연속 실행해도 동일 결과. `processed.json` 이 같은 (session_id, sha256) 을 두 번 처리하지 않음을 보장.
-- **결정론 우선** — LLM 은 좁은 출구(extract, tie-break) 에서만. routing/reconcile/index-build 은 모두 결정론.
-- **단순한 표면** — 명령은 두 개뿐. KB 는 결국 마크다운 파일들의 모음.
+### 4 카테고리 KB, 평문 마크다운
+
+`.harvest/decisions/`, `learnings/`, `reusable/`, `anti-patterns/` 네 개의 폴더에 `.md` 파일로 누적된다. 사용자가 직접 편집 가능하고 (`harvest start` 가 INDEX 를 자동 동기화), `git diff` 로 변경 검토가 가능하며, 시크릿/내부 정보 검토 후 팀 자산으로 commit 할지 개인 메모로 `.gitignore` 할지 사용자가 결정한다.
+
+### Multi-provider LLM (Anthropic / OpenAI / Google)
+
+`HARVEST_PROVIDER` 환경변수로 백엔드를 선택할 수 있다.
+
+| Provider | 기본 모델 | 필요 환경변수 |
+|---|---|---|
+| `anthropic` (default) | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` |
+| `openai` | `gpt-4.1` | `OPENAI_API_KEY` |
+| `google` | `gemini-2.5-pro` | `GOOGLE_GENERATIVE_AI_API_KEY` |
+
+API key 는 항상 환경변수로만 받는다 (CLI argv 에 노출되지 않음).
+
+### 모노레포 자동 감지
+
+`harvest init --scan` 으로 `pnpm-workspace.yaml` / `turbo.json` / `nx.json` / npm·yarn workspaces / `Cargo.toml` / `go.work` 를 자동 감지하여 워크스페이스마다 KB 를 만든다. 자식 KB 의 `CLAUDE.md` 는 부모 KB 의 INDEX 까지 함께 import — "더 구체적인 (가까운) KB 가 우선" 규칙으로 충돌을 해소한다.
+
+### CLAUDE.md 마커 블록 규율
+
+`<!-- harvest:knowledge-base --> ... <!-- /harvest:knowledge-base -->` 마커 사이만 갱신된다. 마커 밖에 사용자가 적은 내용은 절대 건드리지 않는다.
+
+### 결정론 우선
+
+LLM 호출은 좁은 출구 두 곳에서만 발생한다 — (1) transcript 에서 항목을 추출하는 EXTRACT 단계, (2) 유사 항목 비교 시 tie-break. 라우팅 / 머지 / INDEX 빌드는 모두 결정론 코드. 같은 입력에 같은 결과를 보장한다.
+
+### 멱등성 + 안전한 동시 실행
+
+- `harvest start` 를 두 번 연속 실행해도 동일 결과 — `processed.json` 이 `(session_id, sha256)` 키로 중복 처리를 차단.
+- 파일 쓰기는 모두 atomic (temp + rename).
+- KB 단위 lock 으로 동시 실행 차단 (충돌 시 exit 4).
+- SIGINT (Ctrl+C) 시 lock 해제 + INDEX 재빌드 후 exit 130 — 부분 결과 보존.
+
+### 단순한 표면
+
+명령은 두 개뿐 (`init`, `start`). KB 는 결국 마크다운 파일들의 모음이다.
+
+---
+
+## LLM wiki / RAG 메모 도구와의 차이
+
+Notion AI / Mem.ai / Obsidian + AI 플러그인 / 사내 RAG wiki 같은 일반적인 "LLM wiki" 접근과 비교하면, Harvest 의 포지션은 다음과 같이 다르다.
+
+| 축 | 일반 LLM wiki / RAG 메모 | Harvest |
+|---|---|---|
+| **지식 소스** | 사용자가 직접 작성한 노트 / 업로드한 문서 | Claude Code 가 이미 만들어낸 transcript — **저작 부담 0** |
+| **수집 시점** | 사용자가 적을 때 (수동, 의도적) | `harvest start` 한 번 — **세션 종료 후 일괄 수확** |
+| **분류 체계** | 자유 폼 / 사용자 태그 | 4 카테고리 고정 (decisions / learnings / reusable / anti-patterns) — **의견이 있는 라우팅** |
+| **성장 방식** | Monotonic — 적을수록 커짐 | **농축(Concentration)** — 머지 / supersede / archive 가 우선, 신규 작성은 마지막 수단 |
+| **검색 방식** | 쿼리 시점에 임베딩 / 벡터 검색 (RAG) | **검색 없음** — INDEX 가 launch 시 자동 주입되고, Claude 가 필요한 항목을 직접 Read |
+| **LLM 사용 위치** | 모든 retrieval / 답변 생성 단계 | **좁은 출구만** — extract + tie-break. 라우팅 / 머지 / INDEX 빌드는 결정론 |
+| **저장 형식** | 자체 DB / 벡터 인덱스 / 클라우드 | 평문 마크다운 + git — **diff / review / portable** |
+| **컨텍스트 주입** | 사용자가 명시적으로 검색해야 함 | `CLAUDE.md` `@`-import 으로 **다음 세션에 자동 주입** |
+| **스코프** | 보통 글로벌 / 사용자별 | **프로젝트별 + 모노레포 KB chain** (자식이 부모를 상속) |
+| **멱등성** | 같은 입력에도 인덱스 / 모델 상태에 따라 결과 변동 | `processed.json` ledger + atomic write + lock — **같은 transcript 를 두 번 처리하지 않음** |
+
+핵심 차이는 두 가지다.
+
+1. **Pull 이 아니라 Push** — RAG wiki 는 "물어봐야 답한다". Harvest 는 다음 세션 시작 순간 INDEX 가 컨텍스트에 들어가 있어, Claude 가 묻지 않아도 알고 시작한다.
+2. **저장이 아니라 농축** — wiki 는 "안 잊어버리도록 적는 곳". Harvest 는 "이미 일어난 일에서 *반복 가능한 지식만* 골라 작게 유지하는 곳". 머지 / supersede / archive 가 1급 시민이다.
+
+Harvest 는 RAG 를 대체하지 않는다 — 대규모 문서 검색이나 자유 질의응답이 필요하면 wiki 가 맞다. Harvest 는 *Claude Code 세션이 매번 같은 실수를 반복하지 않게 하는* 좁은 문제에 특화되어 있다.
 
 ---
 
 ## 설치
 
-> **사전 요구**: Node.js 20+, [Anthropic API key](https://console.anthropic.com/).
+**사전 요구**: Node.js 20+ / 사용할 provider 의 API key 1 개.
 
-### 글로벌 설치
-
-```bash
-npm i -g harvest-cli
-harvest --version
-```
-
-> **참고**: pre-release (`0.1.0`). npm 게시 직전 `package.json` 의 `repository` URL 의 `<owner>/<repo>` placeholder 를 채워야 한다. 그 전까지는 dev 설치 권장.
-
-### Dev 설치 (현재 권장)
+현재는 pre-release (`0.1.0`) 라 npm 게시 전이며 git clone + `npm link` 가 권장 경로다.
 
 ```bash
-git clone <repo-url> harvest
-cd harvest
+git clone <repo-url> harvest && cd harvest
 npm install
-npm run build
-node dist/harvest.js --version
-# 또는 npm link 로 글로벌 심볼릭 링크
-npm link
+npm run build      # → dist/harvest.js (single ESM bundle)
+npm link           # 글로벌 심볼릭 링크 → harvest 명령 사용 가능
 harvest --version
 ```
-
-빌드 결과물은 `dist/harvest.js` (single ESM bundle, shebang 포함) 하나로 떨어지므로 직접 호출 가능하다.
 
 ---
 
-## Quick start
+## 사용법
+
+### Quick start
 
 ```bash
-# 1) 프로젝트로 이동
+# ── 1. 한 번만: KB 초기화 + API key 등록 ─────────────────────
 cd ~/projects/my-app
+harvest init                              # .harvest/ 생성 + CLAUDE.md 마커 블록 삽입
+export ANTHROPIC_API_KEY=sk-ant-...       # 또는 .env 파일에 적기
 
-# 2) KB 초기화 — .harvest/ 생성 + CLAUDE.md 마커 블록 삽입
+# ── 2. 평소처럼 Claude Code 로 작업 ────────────────────────
+#    transcript 가 ~/.claude/projects/<slug>/*.jsonl 에 자동 누적됨
+
+# ── 3. 주기적으로: 미처리 세션 수확 ─────────────────────────
+harvest start                             # Agent 가 분석 → 4 카테고리 KB 갱신
+git diff .harvest/                        # 변경 검토
+```
+
+다음 Claude Code 세션이 launch 될 때 `CLAUDE.md` 의 `@.harvest/INDEX.md` 가 자동 로드되어, 직전 세션들의 핵심 지식을 갖고 시작한다.
+
+### 일회성 셋업
+
+**KB 초기화** — 단일 프로젝트:
+
+```bash
 harvest init
+```
 
-# 3) Claude Code 로 평소처럼 작업한다 (몇 세션)
-#    transcript 가 ~/.claude/projects/<slug>/*.jsonl 에 쌓인다.
+**모노레포** — 워크스페이스마다 KB 자동 생성:
 
-# 4) Anthropic API key 를 환경 변수로 export
+```bash
+harvest init --scan
+```
+
+**API key 등록** — 사용할 provider 한 개만 설정하면 된다.
+
+```bash
+# Anthropic (default)
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# 5) 미처리 세션을 수확
-harvest start
+# OpenAI 로 바꿀 때
+export HARVEST_PROVIDER=openai
+export OPENAI_API_KEY=sk-...
 
-# 6) 변경 검토
-git diff .harvest/
+# Google 로 바꿀 때
+export HARVEST_PROVIDER=google
+export GOOGLE_GENERATIVE_AI_API_KEY=...
 ```
 
-`harvest start` 가 끝나면 `.harvest/INDEX.md` 와 카테고리 폴더들이 갱신되어 있다. 다음 Claude Code 세션은 launch 시 INDEX 를 자동 로드한다.
+shell `export` 대신 프로젝트 루트의 `.env` / `.env.local` 도 지원 (우선순위: `shell > .env.local > .env` — shell 이 항상 승리).
 
-### 모노레포
+### 매번의 워크플로우
 
 ```bash
-cd <monorepo-root>
-harvest init --scan
-# pnpm-workspace.yaml / turbo.json / package.json#workspaces / Cargo.toml / go.work
-# 자동 감지 → 워크스페이스마다 .harvest/ 와 CLAUDE.md 마커 블록 생성.
-# 각 자식 KB 의 CLAUDE.md 는 부모 KB 의 INDEX 도 함께 import 한다.
+harvest start                  # 모든 미처리 transcript 처리
+harvest start --recent 5       # 최근 5 개 세션만 (첫 실행 backlog 용)
+harvest start --since 2026-04-01T00:00:00Z   # 특정 시점 이후만
+harvest start --dry-run        # 실제 쓰기 없이 의도만 출력
 ```
+
+처리 후엔 `git diff .harvest/` 로 변경을 검토하고, 만족스러우면 commit 또는 그대로 두면 된다 (KB 파일은 사용자가 직접 편집해도 다음 `harvest start` 가 INDEX 를 자동 동기화한다).
 
 ---
 
-## 명령어
+## 명령어 요약
 
 ### `harvest init`
 
-현재 디렉토리에 KB 를 생성한다.
-
 | 플래그 | 설명 |
 |---|---|
-| `--scan` | 모노레포 도구 설정을 자동 감지하여 워크스페이스마다 KB 를 일괄 생성 (pnpm/yarn/npm workspaces, turbo, nx, Cargo, go work). |
-| `--root` | 이 KB 가 체인의 루트임을 표시 (`<!-- harvest:root-kb -->` 주석). |
-
-생성물:
-
-```
-.harvest/
-├── INDEX.md              # 매 세션 자동 import 되는 카탈로그 (작게 유지)
-├── decisions/            # 4 카테고리 — 항목 .md 가 lazy 로드됨
-├── learnings/
-├── reusable/
-├── anti-patterns/
-├── .archive/             # eviction / supersede 시 이동
-└── .state/               # processed.json 등 메타 (사용자 손대지 말 것)
-```
-
-`CLAUDE.md` 는 마커 블록 `<!-- harvest:knowledge-base --> ... <!-- /harvest:knowledge-base -->` 사이만 갱신된다. 마커 밖은 절대 손대지 않는다.
+| `--scan` | 모노레포 자동 감지 → 워크스페이스마다 KB 생성 |
+| `--root` | 이 KB 가 체인의 루트임을 표시 |
 
 ### `harvest start`
 
-미처리 세션을 분석하여 KB 를 갱신한다 (Agent 파이프라인 실행).
-
 | 플래그 | 설명 |
 |---|---|
-| `--discover <path>` | 지정 경로 하위에서 모든 `.harvest/` 를 자동 탐색 (cwd 무시). |
-| `--recent <N>` | 가장 최근 N 개의 미처리 세션만 처리 (양의 정수). 첫 실행 시 backlog 가 클 때 유용. |
-| `--since <ISO8601>` | 특정 시점 이후 세션만 처리. |
-| `--model <name>` | LLM 모델 오버라이드 (기본: `claude-sonnet-4-6`, env `HARVEST_MODEL` 우선). |
-| `--dry-run` | 실제 쓰기 없이 무엇이 일어날지만 출력. (v1 한계: 의도 보고만 하고 일부 쓰기를 완전히 단락하지는 않음 — v2 후보 참조.) |
-| `--verbose` | 단계별 디테일 로그. |
-| `--json` | 머신 가독 출력. |
+| `--provider <name>` | LLM provider: `anthropic` / `openai` / `google` (default: `$HARVEST_PROVIDER`, else `anthropic`) |
+| `--model <id>` | 모델 오버라이드 (default: provider별 default 모델) |
+| `--discover <path>` | 지정 경로 하위에서 모든 `.harvest/` 자동 탐색 |
+| `--recent <N>` | 가장 최근 N 개 미처리 세션만 처리 (첫 실행 backlog 용) |
+| `--since <ISO8601>` | 특정 시점 이후 세션만 처리 |
+| `--dry-run` | 실제 쓰기 없이 의도만 출력 |
+| `--verbose` | 단계별 디테일 로그 |
+| `--json` | 머신 가독 출력 |
 
-SIGINT (Ctrl+C) 시 모든 KB 의 lock 을 해제하고 INDEX 를 재빌드한 후 exit 130. 부분 결과 (이미 commit 된 항목들) 는 보존된다.
+> API key 는 항상 환경변수로만 받는다 (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY` — 활성 provider 에 따라). 미설정 시 exit 5.
 
 ### Global
 
-| 플래그 | 설명 |
-|---|---|
-| `-h, --help` | 도움말 출력. |
-| `-v, --version` | 버전 출력. |
+`-h, --help` / `-v, --version`
 
-도움말은 `harvest --help` 로 언제든 확인 가능.
-
-### 종료 코드 (harvest.md §12.2)
+### 종료 코드
 
 | 코드 | 의미 |
 |---|---|
-| 0 | 정상 종료 |
-| 1 | 일반 오류 (잡힌 예외) |
-| 2 | 사용자 입력 오류 (잘못된 옵션 등) |
+| 0 | 정상 |
+| 1 | 일반 오류 |
+| 2 | 사용자 입력 오류 (잘못된 옵션) |
 | 3 | KB 없음 (`harvest init` 안 함) |
-| 4 | Lock 충돌 (다른 `harvest start` 가 진행 중) |
-| 5 | LLM API 실패 (재시도 다 소진) |
+| 4 | Lock 충돌 |
+| 5 | LLM provider self-error (재시도 다 소진 / 키 미설정) |
 
-### 환경 변수 (harvest.md §12.3)
+---
+
+## 환경 변수
 
 | 변수 | 용도 | 기본 |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Anthropic API key | 필수 |
-| `HARVEST_MODEL` | 모델 오버라이드 | `claude-sonnet-latest` |
-| `HARVEST_TRANSCRIPT_DIR` | transcript 디렉토리 | `~/.claude/projects` |
-| `HARVEST_DEBUG` | 디버그 로그 (LLM 입출력 raw 등) | `0` |
-| `HARVEST_TEST_LLM` | LLM caller 모드 dispatch — `live` / `mock` / `replay` / `record` (테스트/녹화용) | `live` |
-
-### 사용자 직접 편집 정책 (harvest.md §12.4)
-
-`.harvest/<category>/*.md` 항목 파일들은 **사용자가 직접 편집 가능**하다. 다음 `harvest start` 에서 INDEX 가 자동 동기화된다. 진실의 출처 우선순위는 `frontmatter > body`, 카테고리 결정은 `frontmatter type` (디렉토리 위치는 정상화에만 사용).
-
-| 액션 | 정책 |
-|---|---|
-| 본문(body) 수정 | OK. 다음 빌드에 반영. |
-| frontmatter `summary` / `tags` / `paths` 수정 | OK. 다음 INDEX 빌드에 반영. |
-| frontmatter `id` 변경 | 권장 안 함 (다른 항목의 `related: [<old>]` 가 dangling). |
-| 파일명 변경 | OK. ID 는 frontmatter 기준이므로 무관. |
-| 파일을 `.archive/` 로 수동 이동 | OK. 자동으로 archived 인식. |
-| `INDEX.md` 직접 편집 | 권장 안 함. 다음 실행에서 통째로 덮어씀. |
-
-자세한 매트릭스는 `harvest.md` §12.4 참고.
+| `HARVEST_PROVIDER` | `anthropic` / `openai` / `google` | `anthropic` |
+| `HARVEST_MODEL` | 모델 오버라이드 | provider별 default |
+| `ANTHROPIC_API_KEY` | Anthropic provider 사용 시 | — |
+| `OPENAI_API_KEY` | OpenAI provider 사용 시 | — |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | Google provider 사용 시 | — |
+| `HARVEST_TRANSCRIPT_DIR` | transcript 디렉토리 오버라이드 | `~/.claude/projects` |
+| `HARVEST_DEBUG` | `1` → stderr 에 LLM I/O raw 덤프 | `0` |
+| `HARVEST_TEST_LLM` | `live` / `mock` / `replay` / `record` (테스트용) | `live` |
 
 ---
 
-## CLAUDE.md 통합 (harvest.md §13)
+## 보안
 
-`harvest init` 은 `CLAUDE.md` 안에 다음과 같은 마커 블록을 삽입한다.
-
-```markdown
-<!-- harvest:knowledge-base -->
-## Knowledge Base
-
-> Read these indexes silently before starting work. Look for items
-> matching your current task by tags/paths/title. Read full files
-> only as needed.
-
-@.harvest/INDEX.md
-@../.harvest/INDEX.md   <!-- 부모 KB 가 있을 때만 -->
-
-<!-- /harvest:knowledge-base -->
-```
-
-- **마커 블록 안만 갱신**: 사용자가 마커 밖에 쓴 내용은 절대 건드리지 않는다.
-- **체인 자동 감지**: `harvest init` 시 `.git` / `$HOME` boundary 까지 올라가며 부모 KB 를 찾고, 발견된 모든 상위 KB 의 INDEX 를 import 라인에 함께 적는다.
-- **충돌 시 우선순위**: "more specific (closer) KB wins" 규칙을 INDEX 헤더에 함께 기록 → Claude 가 자식 KB 를 우선 따른다.
-
-INDEX 는 매 세션 launch 시 자동 컨텍스트 진입 (always-on, peek). 개별 항목 .md 는 Claude 가 작업 중 필요할 때 능동적으로 Read (lazy).
+- **API key 는 환경변수로만 수신** — CLI argv / 파일에 저장 금지.
+- **transcript 내용은 LLM 으로 전송된다** — transcript 안에 시크릿/토큰이 포함될 수 있음을 인지하고 사용. v1 은 `--redact-secrets` 미지원.
+- **KB 파일은 평문 마크다운** — `.gitignore` 할지 commit 할지 사용자 결정. 팀 commit 시 항목 안에 시크릿이 없는지 검토 권장.
 
 ---
 
-## 보안 (harvest.md §15.3)
+## 더 읽을 거리
 
-- **`ANTHROPIC_API_KEY` 는 환경 변수로만 받는다.** CLI 옵션이나 파일에 저장하지 않는다.
-- **transcript 내용은 LLM 으로 전송된다.** transcript 안에 개인정보 / 시크릿 / 토큰이 포함될 수 있음을 인지하고 사용하라. Anthropic 의 데이터 정책을 함께 참고.
-- **`--redact-secrets` 는 v1 미지원** (transcript 에서 토큰/키 패턴을 마스킹 후 LLM 에 전송하는 옵션). v2 후보.
-- **KB 파일들은 평문 마크다운**이다. `.gitignore` 에 넣을지(개인 메모) commit 할지(팀 자산) 는 사용자가 결정한다. 팀 commit 시 KB 항목 안에 시크릿/내부 정보가 없는지 한 번 더 검토 권장.
-
----
-
-## 로깅 (harvest.md §15.4)
-
-- **기본**: 사용자용 colored 진행 출력 (Stage 단위, stdout).
-- **`--verbose`**: 단계별 입출력 카운트, 시간.
-- **`HARVEST_DEBUG=1`**: 모든 LLM 호출의 입력/출력 raw, prefilter 매칭 디테일 (stderr).
-- 디버그 로그는 stderr, 사용자 출력은 stdout 으로 분리.
-
----
-
-## 상태 — Pre-release (`0.1.0`)
-
-본 프로젝트는 **pre-release** 다. 25개 구현 task 모두 완료. npm 게시 전 마지막 단계로 `package.json` 의 `repository` URL 에 실제 GitHub `<owner>/<repo>` 를 채우면 된다.
-
-현재 동작하는 것:
-- `harvest init` (단일 KB / `--scan` 모노레포 / `--root` 마커) — 완전 동작.
-- `harvest start` (Agent SDK `query()` 호출, in-process MCP server, SIGINT cleanup, `--recent N` / `--discover` / `--since` / `--dry-run` / `--verbose` / `--json`) — 완전 동작.
-- argv 파서, exit code, env vars — 완전 동작.
-- in-process MCP server + 13 개 도구 — 완전 동작.
-- LLM caller 4 모드 (live / mock / replay / record) — 완전 동작.
-- 시나리오 픽스처 01 (`tests/fixtures/scenarios/01-single-kb-single-session/`) — EXTRACT 검증.
-
-449/449 단위 테스트 통과. typecheck / lint / build 모두 green.
-
----
-
-## v2 후보
-
-다음 항목들은 v1 범위 밖, 첫 release 후 사용 데이터 + 실측 후 결정.
-
-- **P-3 (연기)**: frontmatter `paths` 필드 제거 검토. 이유: 파일 이동/리팩토링으로 stale 되기 쉬움. 단 §5.2 KB region routing 이 paths 기반 → 제거 시 routing 알고리즘 재설계 필요. 첫 release 후 stale 빈도 측정 → 결정. 자세한 내용은 [`DESIGN_PROPOSALS.md`](./DESIGN_PROPOSALS.md) P-3 참고.
-- **I-8 (post-v1)**: EXTRACT 50%-fail 1회 재시도. Task 22a 의 hand-authored 픽스처로는 retry 효과 검증 불가 (replay 결정론적). 실측은 record 모드 정기 통합 테스트에서 수행 후 결정. 자세한 내용은 [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) I-8 참고.
-- **`--redact-secrets`** — transcript 의 토큰/키 패턴 마스킹 후 LLM 전송. (§15.3)
-- **`harvest start --dry-run`** 의 *완전한* 단락 보장 (현재는 의도 보고만 하고 일부 쓰기를 단락하지 않을 수 있음).
-
----
-
-## 개발
-
-### 디렉토리 구조 (4-layer, .eslintrc.cjs 가 강제)
-
-```
-src/
-├── core/          # 결정론 코어 — types, time, kb/, transcript/, lock, processed, atomic-write
-├── llm/           # LLM caller (live / mock / replay / record) — core 만 import 가능
-├── tools/         # in-process MCP 도구 13 개 — discovery / analysis / write / meta + server.ts
-├── agent/         # Agent 시스템 프롬프트 상수
-├── claudemd/      # CLAUDE.md 마커 블록 갱신 (cli 의 peer)
-└── cli/           # entry point + argv + init / start command
-```
-
-import 방향은 **CLI → Agent → Tools → LLM → Core** (right 방향 only). `claudemd/` 는 `cli/` 의 peer, `core/` 만 import 가능. ESLint `no-restricted-paths` 가 강제.
-
-### 테스트 / 빌드
-
-```bash
-npm install
-npm run typecheck   # tsc --noEmit
-npm test            # vitest run --passWithNoTests
-npm run lint        # eslint .
-npm run build       # tsup → dist/harvest.js (single ESM bundle, shebang)
-```
-
-전체 게이트는 `npm run typecheck && npm test && npm run lint && npm run build`.
-
-### LLM 모드 (테스트용)
-
-```bash
-# Live (기본) — 실제 Anthropic API 호출
-HARVEST_TEST_LLM=live npm test
-
-# Mock — 고정 fixture 응답
-HARVEST_TEST_LLM=mock npm test
-
-# Replay — 녹화된 fixture 재생
-HARVEST_TEST_LLM=replay npm test
-
-# Record — 실제 호출 + 녹화 (CI 비추천)
-HARVEST_TEST_LLM=record npm test
-```
-
-자세한 내용은 `src/llm/` 와 `harvest.md` §16 참고.
-
-### 더 읽을 거리
-
-- [`harvest.md`](./harvest.md) — v2.3 구현 계획서 (single source of truth).
-- [`PROGRESS.md`](./PROGRESS.md) — task 별 진행 현황.
-- [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) — 구현 중 발견한 spec 결함.
-- [`DESIGN_PROPOSALS.md`](./DESIGN_PROPOSALS.md) — 설계 변경 제안.
+- [`harvest.md`](./harvest.md) — 구현 계획서 (single source of truth, v2.3).
+- [`architecture.md`](./architecture.md) — 디렉토리 구조 + 레이어 규칙.
+- [`product.md`](./product.md) — 제품 프레이밍.
+- [`PROGRESS.md`](./PROGRESS.md) — task 진행 현황.
+- [`CHANGELOG.md`](./CHANGELOG.md) — 릴리즈 노트.
+- [`PLAN_MULTI_PROVIDER.md`](./PLAN_MULTI_PROVIDER.md) — multi-provider 도입 계획.
+- [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) / [`DESIGN_PROPOSALS.md`](./DESIGN_PROPOSALS.md) — spec 결함 및 설계 변경 제안.
 
 ---
 
 ## License
 
 MIT — see [`LICENSE`](./LICENSE).
-
----
-
-## Acknowledgements
-
-- Anthropic 공식 SessionEnd hook + transcript_path 메커니즘
-- claude-mem (외부 워커가 세션 관찰 후 컨텍스트 주입)
-- jimmc414 의 sophia-system3 (episodic memory + reflection)
-- 일반 개발자 retrospective / Zettelkasten / PARA 패턴

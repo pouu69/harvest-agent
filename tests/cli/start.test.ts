@@ -291,6 +291,98 @@ describe("cleanupOnSignal — lock cleanup", () => {
   });
 });
 
+describe("runStart — provider + API key validation (PLAN_MULTI_PROVIDER §6)", () => {
+  it("forwards --provider through to runAgent", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    let capturedProvider: string | undefined;
+    const code = await runStart({
+      cwd: root,
+      provider: "openai",
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr: captured0(),
+      runAgentImpl: async (opts) => {
+        capturedProvider = opts.provider;
+        return { exitCode: 0, resultSubtype: "success" };
+      },
+    });
+    expect(code).toBe(0);
+    expect(capturedProvider).toBe("openai");
+  });
+
+  it("falls back to HARVEST_PROVIDER env when --provider is unset", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    let capturedProvider: string | undefined;
+    await runStart({
+      cwd: root,
+      env: { HARVEST_PROVIDER: "google" },
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr: captured0(),
+      runAgentImpl: async (opts) => {
+        capturedProvider = opts.provider;
+        return { exitCode: 0, resultSubtype: "success" };
+      },
+    });
+    expect(capturedProvider).toBe("google");
+  });
+
+  it("returns exit 5 with a clear message when the matching API key is unset", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const stderr = captured();
+    const code = await runStart({
+      cwd: root,
+      provider: "anthropic",
+      env: {}, // no ANTHROPIC_API_KEY
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr,
+      // No runAgentImpl → real key validation kicks in.
+    });
+    expect(code).toBe(5);
+    expect(read(stderr)).toMatch(/ANTHROPIC_API_KEY is not set/);
+  });
+
+  it("returns exit 5 for missing OPENAI_API_KEY when provider=openai", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const stderr = captured();
+    const code = await runStart({
+      cwd: root,
+      provider: "openai",
+      env: {},
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr,
+    });
+    expect(code).toBe(5);
+    expect(read(stderr)).toMatch(/OPENAI_API_KEY is not set/);
+  });
+
+  it("returns exit 2 with a clear message when HARVEST_PROVIDER env is bogus", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const stderr = captured();
+    const code = await runStart({
+      cwd: root,
+      env: { HARVEST_PROVIDER: "bedrock" },
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr,
+    });
+    expect(code).toBe(2);
+    expect(read(stderr)).toMatch(/HARVEST_PROVIDER/);
+  });
+});
+
 describe("runStart — --discover with empty result", () => {
   it("emits a discover-specific error to stderr and exits 3", async () => {
     // root has NO .harvest/ anywhere — discover yields empty chain.

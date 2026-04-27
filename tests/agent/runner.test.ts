@@ -1,16 +1,18 @@
 /**
  * Tests for `src/agent/runner.ts` — the harvest-start orchestration core.
  *
- * Coverage:
+ * Coverage (post Phase 2 of PLAN_MULTI_PROVIDER):
  *   - Lock acquisition for every KB in the chain (sequential).
- *   - SDK `query()` injected via `opts.query` so we never make a real network
- *     call. The fake yields a scripted message stream.
- *   - Lock release in the `finally` even when `query()` throws.
+ *   - Agent loop injected via `opts.runLoop` so we never make a real
+ *     network call. The fake emits scripted step events through the
+ *     `onStep` callback the runner installs.
+ *   - Lock release in the `finally` even when the loop throws.
  *   - Exit-code mapping (§12.2):
- *       result.subtype = "success"            → 0
- *       result.subtype = "error" / max_turns  → 1
- *       LockBlockedError on acquireLock       → 4
- *       Thrown error from query()             → 5
+ *       finishReason = "stop"          → 0  (success)
+ *       finishReason = "tool-calls"    → 1  (error_max_turns)
+ *       finishReason = "error"         → 1  (error)
+ *       LockBlockedError on acquireLock → 4
+ *       Thrown error from runLoop      → 5
  */
 
 import { mkdirSync, mkdtempSync, readdirSync, realpathSync } from "node:fs";
@@ -20,65 +22,70 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { runAgent } from "../../src/agent/runner.js";
+import { runAgent, type RunLoopFn } from "../../src/agent/runner.js";
+import type { StepEvent } from "../../src/agent/message-handler.js";
+import type {
+  RunAgentLoopOptions,
+  RunAgentLoopResult,
+} from "../../src/agent/loop.js";
 import { DEFAULT_MOCK_RESULT, MockLlmCaller } from "../../src/llm/mock-caller.js";
 import type { KBChainEntry } from "../../src/core/types.js";
 
 // ---------------------------------------------------------------------------
-// Fake query() helpers
+// Fake runLoop helpers
 // ---------------------------------------------------------------------------
 
-type FakeMsg = unknown;
+interface FakeRunLoop extends RunLoopFn {
+  captured: () => RunAgentLoopOptions | null;
+}
 
-/** A function that mimics the SDK `query()` signature for our purposes. */
-type FakeQueryFn = ((params: { prompt: unknown; options: unknown }) => unknown) & {
-  captured: () => { prompt: unknown; options: unknown } | null;
-};
-
-/** Build a minimal fake `query()` that yields a fixed sequence of messages. */
-function fakeQuery(messages: FakeMsg[]): FakeQueryFn {
-  let cap: { prompt: unknown; options: unknown } | null = null;
-  const fn = ((params: { prompt: unknown; options: unknown }) => {
-    cap = { prompt: params.prompt, options: params.options };
-    return (async function* () {
-      for (const m of messages) yield m;
-    })();
-  }) as FakeQueryFn;
+/**
+ * Build a minimal fake `runAgentLoop` that:
+ *   - records the options the runner passed in,
+ *   - emits a scripted sequence of step events via the runner-supplied
+ *     `onStep` callback, and
+ *   - resolves with a hardcoded result.
+ */
+function fakeRunLoop(
+  events: StepEvent[],
+  result: RunAgentLoopResult = {
+    finishReason: "stop",
+    usage: { inputTokens: 0, outputTokens: 0 },
+    numSteps: events.filter((e) => e.type !== "init" && e.type !== "finish")
+      .length,
+  },
+): FakeRunLoop {
+  let cap: RunAgentLoopOptions | null = null;
+  const fn = (async (opts: RunAgentLoopOptions) => {
+    cap = opts;
+    for (const e of events) {
+      opts.onStep?.(e);
+    }
+    return result;
+  }) as FakeRunLoop;
   fn.captured = () => cap;
   return fn;
 }
 
-/** A common scripted "happy path" stream: init → assistant → user → result. */
-function happyPathMessages(): FakeMsg[] {
+/** A common scripted "happy path" stream: init → tool_call → tool_result → finish (success). */
+function happyPathEvents(): StepEvent[] {
   return [
-    { type: "system", subtype: "init", session_id: "s1" },
+    { type: "init" },
     {
-      type: "assistant",
-      message: {
-        content: [
-          {
-            type: "tool_use",
-            id: "t1",
-            name: "mcp__harvest__list_unprocessed_sessions",
-            input: { limit: 5 },
-          },
-        ],
-      },
+      type: "tool_call",
+      toolName: "list_unprocessed_sessions",
+      input: { limit: 5 },
     },
     {
-      type: "user",
-      message: {
-        content: [
-          { type: "tool_result", tool_use_id: "t1", content: "{\"sessions\":[]}" },
-        ],
-      },
+      type: "tool_result",
+      toolName: "list_unprocessed_sessions",
+      output: { sessions: [] },
     },
     {
-      type: "result",
-      subtype: "success",
-      num_turns: 4,
-      total_cost_usd: 0.05,
-      result: "ok",
+      type: "finish",
+      finishReason: "stop",
+      usage: { inputTokens: 100, outputTokens: 50 },
+      numSteps: 4,
     },
   ];
 }
@@ -130,14 +137,13 @@ function captured(): NodeJS.WritableStream {
 // ---------------------------------------------------------------------------
 
 describe("runAgent — happy path", () => {
-  it("acquires lock, runs query, captures result, releases lock", async () => {
+  it("acquires lock, runs loop, captures result, releases lock", async () => {
     const kbChain = makeKbChain(root);
-    const fq = fakeQuery(happyPathMessages());
+    const rl = fakeRunLoop(happyPathEvents());
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       stdout: captured(),
       stderr: captured(),
@@ -145,7 +151,7 @@ describe("runAgent — happy path", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.numTurns).toBe(4);
-    expect(result.totalCostUsd).toBeCloseTo(0.05);
+    expect(result.totalCostUsd).toBe(0);
     expect(result.resultSubtype).toBe("success");
 
     // Lock removed after run.
@@ -157,12 +163,10 @@ describe("runAgent — happy path", () => {
     const child = path.join(root, "apps", "web");
     mkdirSync(child, { recursive: true });
     const kbChain = makeKbChain(child, root);
-    const fq = fakeQuery(happyPathMessages());
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: fakeRunLoop(happyPathEvents()),
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       stdout: captured(),
       stderr: captured(),
@@ -176,69 +180,56 @@ describe("runAgent — happy path", () => {
   });
 });
 
-describe("runAgent — query options surface", () => {
-  it("passes systemPrompt + mcpServers + allowedTools to query()", async () => {
+describe("runAgent — loop options surface", () => {
+  it("passes system prompt + tools + maxSteps to runAgentLoop", async () => {
     const kbChain = makeKbChain(root);
-    const fq = fakeQuery(happyPathMessages());
+    const rl = fakeRunLoop(happyPathEvents());
 
     await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       stdout: captured(),
       stderr: captured(),
     });
 
-    const cap = (fq as unknown as { captured: () => { prompt: unknown; options: unknown } }).captured();
-    expect(cap).toBeTruthy();
-    const opts = cap.options as Record<string, unknown>;
-    expect(typeof opts["systemPrompt"]).toBe("string");
-    expect((opts["systemPrompt"] as string).length).toBeGreaterThan(100);
-
-    const mcp = opts["mcpServers"] as Record<string, unknown>;
-    expect(mcp).toBeTruthy();
-    expect(mcp["harvest"]).toBeTruthy();
-
-    const allowed = opts["allowedTools"] as string[];
-    expect(Array.isArray(allowed)).toBe(true);
-    expect(allowed).toContain("mcp__harvest__list_unprocessed_sessions");
-
-    expect(opts["tools"]).toEqual([]);
-    expect(opts["maxTurns"]).toBe(300);
-    expect(opts["permissionMode"]).toBe("bypassPermissions");
-    expect(opts["settingSources"]).toEqual([]);
+    const opts = rl.captured();
+    expect(opts).toBeTruthy();
+    expect(typeof opts!.system).toBe("string");
+    expect(opts!.system.length).toBeGreaterThan(100);
+    expect(typeof opts!.prompt).toBe("string");
+    expect(Object.keys(opts!.tools)).toContain("list_unprocessed_sessions");
+    expect(opts!.maxSteps).toBe(300);
   });
 
-  it("honors a custom maxTurns / model", async () => {
+  it("honors a custom maxTurns / model / provider", async () => {
     const kbChain = makeKbChain(root);
-    const fq = fakeQuery(happyPathMessages());
+    const rl = fakeRunLoop(happyPathEvents());
 
     await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       maxTurns: 50,
       model: "claude-sonnet-test",
+      provider: "anthropic",
       stdout: captured(),
       stderr: captured(),
     });
 
-    const cap = (fq as unknown as { captured: () => { options: unknown } }).captured();
-    const opts = cap.options as Record<string, unknown>;
-    expect(opts["maxTurns"]).toBe(50);
-    expect(opts["model"]).toBe("claude-sonnet-test");
+    const opts = rl.captured();
+    expect(opts!.maxSteps).toBe(50);
+    expect(opts!.model).toBe("claude-sonnet-test");
+    expect(opts!.provider).toBe("anthropic");
   });
 
   it("includes a kickoff prompt mentioning recent / since when given", async () => {
     const kbChain = makeKbChain(root);
-    const fq = fakeQuery(happyPathMessages());
+    const rl = fakeRunLoop(happyPathEvents());
 
     await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       recent: 5,
       since: "2026-04-01T00:00:00Z",
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
@@ -246,30 +237,35 @@ describe("runAgent — query options surface", () => {
       stderr: captured(),
     });
 
-    const cap = (fq as unknown as { captured: () => { prompt: unknown; options: unknown } }).captured();
-    const prompt = cap.prompt as string;
-    expect(prompt).toContain("5"); // recent count
-    expect(prompt).toContain("2026-04-01"); // since
+    const opts = rl.captured();
+    expect(opts!.prompt).toContain("5");
+    expect(opts!.prompt).toContain("2026-04-01");
   });
 });
 
 describe("runAgent — exit code mapping (§12.2)", () => {
-  it("returns 1 on error_max_turns", async () => {
+  it("returns 1 on tool-calls finishReason (max_turns equivalent)", async () => {
     const kbChain = makeKbChain(root);
-    const fq = fakeQuery([
-      { type: "system", subtype: "init" },
+    const rl = fakeRunLoop(
+      [
+        { type: "init" },
+        {
+          type: "finish",
+          finishReason: "tool-calls",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          numSteps: 300,
+        },
+      ],
       {
-        type: "result",
-        subtype: "error_max_turns",
-        num_turns: 300,
-        total_cost_usd: 0.5,
+        finishReason: "tool-calls",
+        usage: { inputTokens: 10, outputTokens: 5 },
+        numSteps: 300,
       },
-    ]);
+    );
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       stdout: captured(),
       stderr: captured(),
@@ -279,22 +275,28 @@ describe("runAgent — exit code mapping (§12.2)", () => {
     expect(result.resultSubtype).toBe("error_max_turns");
   });
 
-  it("returns 1 on a generic error result", async () => {
+  it("returns 1 on a generic error finishReason", async () => {
     const kbChain = makeKbChain(root);
-    const fq = fakeQuery([
-      { type: "system", subtype: "init" },
+    const rl = fakeRunLoop(
+      [
+        { type: "init" },
+        {
+          type: "finish",
+          finishReason: "error",
+          usage: { inputTokens: 10, outputTokens: 5 },
+          numSteps: 7,
+        },
+      ],
       {
-        type: "result",
-        subtype: "error_during_execution",
-        num_turns: 7,
-        total_cost_usd: 0.05,
+        finishReason: "error",
+        usage: { inputTokens: 10, outputTokens: 5 },
+        numSteps: 7,
       },
-    ]);
+    );
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       stdout: captured(),
       stderr: captured(),
@@ -304,43 +306,37 @@ describe("runAgent — exit code mapping (§12.2)", () => {
     expect(result.resultSubtype).toBe("error");
   });
 
-  it("returns 5 when query() throws (network/auth fail)", async () => {
+  it("returns 5 when runLoop throws (network/auth fail)", async () => {
     const kbChain = makeKbChain(root);
-    const fq = (() => {
+    const rl: RunLoopFn = async () => {
       throw new Error("net down");
-    }) as unknown;
+    };
 
     const stderr = captured();
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       stdout: captured(),
       stderr,
     });
 
     expect(result.exitCode).toBe(5);
-    // Lock released even on thrown error.
     const remaining = readdirSync(kbChain[0]!.kb_path);
     expect(remaining).not.toContain(".lock");
-    // Error logged to stderr.
     expect((stderr as unknown as CapturedStream).text()).toContain("net down");
   });
 
-  it("returns 5 when iteration throws mid-stream", async () => {
+  it("returns 5 when runLoop throws after emitting init", async () => {
     const kbChain = makeKbChain(root);
-    const fq = (() => {
-      return (async function* () {
-        yield { type: "system", subtype: "init" };
-        throw new Error("stream broke");
-      })();
-    }) as unknown;
+    const rl: RunLoopFn = async (opts) => {
+      opts.onStep?.({ type: "init" });
+      throw new Error("stream broke");
+    };
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       stdout: captured(),
       stderr: captured(),
@@ -353,9 +349,6 @@ describe("runAgent — exit code mapping (§12.2)", () => {
 
   it("returns 4 when a lock is already held (LockBlockedError)", async () => {
     const kbChain = makeKbChain(root);
-    // Pre-create a fresh lock owned by a (faked) live pid on this host so
-    // acquireLock returns LockBlockedError("held_same_host"). We borrow
-    // acquireLock directly to do this so we don't depend on private impl.
     const { acquireLock } = await import("../../src/core/lock.js");
     acquireLock(kbChain[0]!.kb_path, {
       command: "harvest test pre-lock",
@@ -363,24 +356,26 @@ describe("runAgent — exit code mapping (§12.2)", () => {
       pid: process.pid,
     });
 
-    // Fake query — should never be called because the lock blocks first.
-    let queryCalled = false;
-    const fq = (() => {
-      queryCalled = true;
-      return [];
-    }) as unknown;
+    let runLoopCalled = false;
+    const rl: RunLoopFn = async () => {
+      runLoopCalled = true;
+      return {
+        finishReason: "stop",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        numSteps: 0,
+      };
+    };
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       stdout: captured(),
       stderr: captured(),
     });
 
     expect(result.exitCode).toBe(4);
-    expect(queryCalled).toBe(false);
+    expect(runLoopCalled).toBe(false);
   });
 });
 
@@ -389,7 +384,7 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
     const child = path.join(root, "apps", "web");
     mkdirSync(child, { recursive: true });
     const kbChain = makeKbChain(child, root);
-    const fq = fakeQuery(happyPathMessages());
+    const rl = fakeRunLoop(happyPathEvents());
 
     const calls: string[] = [];
     const buildIndexFn = (opts: { kbPath: string; nowIso: string }) => {
@@ -403,8 +398,7 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       buildIndexFn,
       stdout: captured(),
@@ -412,10 +406,8 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
     });
 
     expect(result.exitCode).toBe(0);
-    // One call per KB in chain.
     expect(calls).toHaveLength(kbChain.length);
     expect(calls).toEqual(kbChain.map((e) => e.kb_path));
-    // INDEX.md actually written for each.
     for (const entry of kbChain) {
       const written = await fsp.readFile(
         path.join(entry.kb_path, "INDEX.md"),
@@ -425,17 +417,24 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
     }
   });
 
-  it("rebuilds INDEX even on max_turns (non-fatal)", async () => {
+  it("rebuilds INDEX even on error_max_turns (non-fatal)", async () => {
     const kbChain = makeKbChain(root);
-    const fq = fakeQuery([
-      { type: "system", subtype: "init" },
+    const rl = fakeRunLoop(
+      [
+        { type: "init" },
+        {
+          type: "finish",
+          finishReason: "tool-calls",
+          usage: { inputTokens: 0, outputTokens: 0 },
+          numSteps: 300,
+        },
+      ],
       {
-        type: "result",
-        subtype: "error_max_turns",
-        num_turns: 300,
-        total_cost_usd: 0.5,
+        finishReason: "tool-calls",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        numSteps: 300,
       },
-    ]);
+    );
 
     let calls = 0;
     const buildIndexFn = () => {
@@ -445,8 +444,7 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       buildIndexFn,
       stdout: captured(),
@@ -460,13 +458,12 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
     const child = path.join(root, "apps", "web");
     mkdirSync(child, { recursive: true });
     const kbChain = makeKbChain(child, root);
-    const fq = fakeQuery(happyPathMessages());
+    const rl = fakeRunLoop(happyPathEvents());
 
     const stderr = captured();
     const calls: string[] = [];
     const buildIndexFn = (opts: { kbPath: string; nowIso: string }) => {
       calls.push(opts.kbPath);
-      // Throw for the first KB only; the second must still rebuild.
       if (opts.kbPath === kbChain[0]!.kb_path) {
         throw new Error("synthetic INDEX failure");
       }
@@ -475,8 +472,7 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
 
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       buildIndexFn,
       stdout: captured(),
@@ -485,13 +481,11 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
 
     expect(result.exitCode).toBe(0);
     expect(calls).toHaveLength(2);
-    // Second KB still rebuilt.
     const written = await fsp.readFile(
       path.join(kbChain[1]!.kb_path, "INDEX.md"),
       "utf8",
     );
     expect(written).toBe("ok\n");
-    // Error logged.
     expect((stderr as unknown as CapturedStream).text()).toContain(
       "synthetic INDEX failure",
     );
@@ -512,13 +506,13 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
       return { content: "x\n", skipped: [], line_count: 1 };
     };
 
-    const fq = (() => {
+    const rl: RunLoopFn = async () => {
       throw new Error("never called");
-    }) as unknown;
+    };
+
     const result = await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
       buildIndexFn,
       stdout: captured(),
@@ -529,22 +523,22 @@ describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () =
   });
 });
 
-describe("runAgent — server factory injection", () => {
-  it("accepts a serverFactory override (used by integration tests)", async () => {
+describe("runAgent — toolBuilder injection", () => {
+  it("accepts a toolBuilder override (used by integration tests)", async () => {
     const kbChain = makeKbChain(root);
-    const fq = fakeQuery(happyPathMessages());
+    const rl = fakeRunLoop(happyPathEvents());
 
     let factoryCalled = 0;
-    const realFactory = (await import("../../src/tools/server.js")).createHarvestServer;
+    const realBuilder = (await import("../../src/agent/tool-registry.js"))
+      .buildHarvestTools;
 
     await runAgent({
       kbChain,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      query: fq as any,
+      runLoop: rl,
       llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
-      serverFactory: (deps) => {
+      toolBuilder: (deps) => {
         factoryCalled += 1;
-        return realFactory(deps);
+        return realBuilder(deps);
       },
       stdout: captured(),
       stderr: captured(),
@@ -553,4 +547,3 @@ describe("runAgent — server factory injection", () => {
     expect(factoryCalled).toBe(1);
   });
 });
-

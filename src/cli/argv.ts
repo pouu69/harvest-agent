@@ -19,8 +19,10 @@
  *   - Bare `--help`/`-h` with no command → command = "help".
  *   - Bare `--version`/`-v` with no command → command = "version".
  *   - `--<flag> <value>` for value flags (`--discover`, `--since`, `--model`,
- *     `--recent`). Missing value → throw. `--recent` additionally validates the
- *     value as a positive integer (DESIGN_PROPOSALS P-1).
+ *     `--provider`, `--recent`). Missing value → throw. `--recent` additionally
+ *     validates the value as a positive integer (DESIGN_PROPOSALS P-1).
+ *     `--provider` is validated against the closed set of supported providers
+ *     (`anthropic` | `openai` | `google`) per PLAN_MULTI_PROVIDER §6.
  *   - `--<flag>` for booleans (`--scan`, `--root`, `--verbose`, `--json`,
  *     `--dry-run`).
  *   - Unknown flag → throw with the offending token.
@@ -32,6 +34,10 @@
  */
 
 export type Command = "init" | "start" | "help" | "version";
+
+/** Supported LLM providers (PLAN_MULTI_PROVIDER §6). */
+export const SUPPORTED_PROVIDERS = ["anthropic", "openai", "google"] as const;
+export type ProviderFlag = (typeof SUPPORTED_PROVIDERS)[number];
 
 export interface ParsedArgs {
   command: Command;
@@ -50,6 +56,10 @@ export interface ParsedArgs {
     since?: string;
     /** `start --model <name>` — LLM model override. */
     model?: string;
+    /** `start --provider <name>` — LLM provider override. One of
+     *  `anthropic` | `openai` | `google` (PLAN_MULTI_PROVIDER §6). Wins
+     *  over `HARVEST_PROVIDER` env. */
+    provider?: ProviderFlag;
     /** `start --recent <N>` — process only the most recent N unprocessed
      *  sessions (DESIGN_PROPOSALS P-1). N is a positive integer. */
     recent?: number;
@@ -152,6 +162,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
           throw new ArgvParseError(`--model requires a value`);
         }
         flags.model = v;
+        i += 1;
+        break;
+      }
+      case "--provider": {
+        const v = args[i + 1];
+        if (v === undefined || v.startsWith("-")) {
+          throw new ArgvParseError(`--provider requires a value`);
+        }
+        if (!(SUPPORTED_PROVIDERS as readonly string[]).includes(v)) {
+          throw new ArgvParseError(
+            `--provider must be one of ${SUPPORTED_PROVIDERS.join(" | ")}, got: ${v}`,
+          );
+        }
+        flags.provider = v as ProviderFlag;
         i += 1;
         break;
       }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { AiSdkLlmCaller } from "../../src/llm/ai-sdk-caller.js";
 import { FixtureLlmCaller } from "../../src/llm/fixture-caller.js";
-import { LiveLlmCaller } from "../../src/llm/live-caller.js";
 import { MockLlmCaller } from "../../src/llm/mock-caller.js";
 import { RecordingLlmCaller } from "../../src/llm/recording-caller.js";
 import { selectLlmCaller } from "../../src/llm/select.js";
@@ -22,9 +22,9 @@ describe("selectLlmCaller", () => {
     expect(caller).toBeInstanceOf(RecordingLlmCaller);
   });
 
-  it("explicit 'live' returns a LiveLlmCaller", () => {
+  it("explicit 'live' returns an AiSdkLlmCaller", () => {
     const caller = selectLlmCaller("live");
-    expect(caller).toBeInstanceOf(LiveLlmCaller);
+    expect(caller).toBeInstanceOf(AiSdkLlmCaller);
   });
 
   it("env HARVEST_TEST_LLM=mock dispatches to MockLlmCaller", () => {
@@ -48,13 +48,13 @@ describe("selectLlmCaller", () => {
     expect(caller).toBeInstanceOf(RecordingLlmCaller);
   });
 
-  it("missing/empty env defaults to LiveLlmCaller", () => {
-    expect(
-      selectLlmCaller(undefined, { env: {} }),
-    ).toBeInstanceOf(LiveLlmCaller);
+  it("missing/empty env defaults to AiSdkLlmCaller (live)", () => {
+    expect(selectLlmCaller(undefined, { env: {} })).toBeInstanceOf(
+      AiSdkLlmCaller,
+    );
     expect(
       selectLlmCaller(undefined, { env: { HARVEST_TEST_LLM: "" } }),
-    ).toBeInstanceOf(LiveLlmCaller);
+    ).toBeInstanceOf(AiSdkLlmCaller);
   });
 
   it("unknown env value throws", () => {

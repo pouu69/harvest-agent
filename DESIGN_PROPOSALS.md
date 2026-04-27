@@ -67,6 +67,34 @@
 
 ---
 
+## P-4. Multi-provider LLM 지원 (Anthropic / OpenAI / Google) — ✅ **수락**
+
+**제안 (사용자, 2026-04-27)**: `harvest-cli` 가 `@anthropic-ai/claude-agent-sdk` 한 곳에 묶여있어 Anthropic API 키 만 사용 가능. OpenAI / Google Gemini 도 선택 가능하도록 확장.
+
+**유효성**: 사용자가 자체 인프라에서 Claude 외 모델을 운영하는 경우 / 비용·가용성 차이로 provider 선택지가 필요. 현재는 Bedrock·Vertex 도 모두 Claude 모델만 라우팅 → 모델 패밀리 자체 교체 불가.
+
+**조사 결과**:
+- 단발 LLM 호출 layer (`src/llm/`) 는 이미 추상화 — `LlmCaller` 인터페이스 + `select.ts` + 4 모드 구현체 (`mock`/`record`/`replay`/`live`).
+- agent 루프 (`src/agent/runner.ts` 의 `query()`) 와 도구 등록 (`src/tools/server.ts` 의 `createSdkMcpServer`) 이 Anthropic SDK 강결합.
+- 13 개 도구 정의(Zod 스키마), `system-prompt.ts`, `core/`, `claudemd/` 는 provider 중립.
+
+**채택안**: Vercel AI SDK (`ai` + `@ai-sdk/anthropic|openai|google`) 를 통합 추상층으로 도입. `generateText({ tools, stopWhen })` 한 줄로 multi-step tool 루프를 라이브러리에 위임 → 자체 구현 ~1500 줄 → ~300 줄.
+
+**호환성**:
+- `LlmCaller` 시그니처 보존 → 기존 EXTRACT 단위 테스트 무변경.
+- `RunState` 외부 shape 보존 → `runner` 단위 테스트 무변경.
+- record/replay 키 함수(prompt-hash) 보존 → fixture 정책 유지(단, provider 별 분리 녹화 정책은 신규).
+- `harvest start` CLI 표면: `--provider <anthropic|openai|google>` flag 추가, env: `HARVEST_PROVIDER` + provider별 API 키.
+- `harvest.md` §10.5, §12.2, §16.4 표현 일반화 ("Agent SDK self-error" → "LLM provider self-error").
+
+**적용 시점**: 별도 PLAN 문서 — [`PLAN_MULTI_PROVIDER.md`](./PLAN_MULTI_PROVIDER.md) — 5 phase 로 나눠서 단계별 머지. 각 phase 끝마다 typecheck + test + lint + build 그린이 머지 조건.
+
+**spec 영향**: §16.4 LLM modes 표 확장. §10.5 self-error 문구 일반화. §12.2 exit code 표는 그대로 (5 의 의미만 일반화).
+
+**관련 SPEC_DEFECTS**: 새 ID (`I-12` 또는 다음 가용 번호) 로 "agent loop 강결합 → AI SDK 마이그레이션" 등록 예정.
+
+---
+
 ## 향후 추가 시 양식
 
 새 제안은 P-N (Proposal-N) 으로 단조 증가. 각 항목은:

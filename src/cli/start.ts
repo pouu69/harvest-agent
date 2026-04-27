@@ -40,6 +40,11 @@ import { findKbChain, computeKbRegion } from "../core/kb/chain.js";
 import { buildIndexMarkdown } from "../core/kb/index-builder.js";
 import { nowIso } from "../core/time.js";
 import type { KBChainEntry } from "../core/types.js";
+import {
+  API_KEY_ENV_FOR,
+  parseProvider,
+  type Provider,
+} from "../llm/providers/index.js";
 
 import { runAgent, type RunAgentOptions, type RunAgentResult } from "../agent/runner.js";
 
@@ -54,12 +59,20 @@ export interface StartOptions {
   recent?: number;
   since?: string;
   model?: string;
+  /** Active LLM provider (PLAN_MULTI_PROVIDER). If unset, resolved from
+   *  `HARVEST_PROVIDER` env (→ `anthropic`). */
+  provider?: Provider;
   dryRun: boolean;
   verbose: boolean;
   json: boolean;
   /** Streams. */
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
+  /**
+   * Override env source for provider/key resolution. Tests pass an
+   * isolated bag so they don't depend on the runner's real env.
+   */
+  env?: NodeJS.ProcessEnv;
   /**
    * Test-only injection seam for the agent runner. Production calls leave
    * this undefined; tests pass a fake to assert on the options surface
@@ -97,6 +110,41 @@ export async function runStart(opts: StartOptions): Promise<number> {
       );
     }
     return 3;
+  }
+
+  // ---- 1b. Resolve provider + verify the matching API key is present ----
+  //
+  // We resolve the provider here (CLI > env > anthropic default) so we can
+  // fail fast with exit 5 ("LLM provider self-error" in the generalized
+  // §10.5 / §12.2 wording) before grabbing locks. A missing key after
+  // lock acquisition would still abort, but the user would have to wait
+  // through lock release and INDEX rebuild for a problem that's
+  // pre-flight verifiable.
+  //
+  // Skipped when `runAgentImpl` is injected (tests) — the fake doesn't
+  // actually need a key.
+  const env = opts.env ?? process.env;
+  let resolvedProvider: Provider;
+  try {
+    resolvedProvider = parseProvider({ explicit: opts.provider, env });
+  } catch (err) {
+    // parseProvider throws on unknown HARVEST_PROVIDER values. CLI
+    // arguments are validated at parseArgs time, so this only fires for
+    // bad env vars.
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr.write(`Error: ${msg}\n`);
+    return 2;
+  }
+  if (opts.runAgentImpl === undefined) {
+    const keyEnv = API_KEY_ENV_FOR[resolvedProvider];
+    const keyVal = env[keyEnv];
+    if (keyVal === undefined || keyVal === "") {
+      stderr.write(
+        `Error: ${keyEnv} is not set. Required when HARVEST_PROVIDER=${resolvedProvider}.\n` +
+          `       Export it in your shell or add it to .env / .env.local.\n`,
+      );
+      return 5;
+    }
   }
 
   // ---- 2. Dry-run short-circuit --------------------------------------------
@@ -138,6 +186,7 @@ export async function runStart(opts: StartOptions): Promise<number> {
     if (opts.recent !== undefined) runOptions.recent = opts.recent;
     if (opts.since !== undefined) runOptions.since = opts.since;
     if (opts.model !== undefined) runOptions.model = opts.model;
+    runOptions.provider = resolvedProvider;
 
     const result = await runner(runOptions);
 

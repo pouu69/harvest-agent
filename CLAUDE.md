@@ -27,12 +27,26 @@ After build, the CLI is at `dist/harvest.js` (executable; has `#!/usr/bin/env no
 
 `HARVEST_TEST_LLM` switches the LLM caller across four modes (see `src/llm/select.ts`):
 
-- `live` (default) — real Anthropic API. Requires `ANTHROPIC_API_KEY`.
+- `live` (default) — real provider API call via Vercel AI SDK. Requires the API key for the active provider (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY` — see Multi-provider below).
 - `mock` — fixed canonical result. Use for unit tests that just need the call to succeed.
 - `replay` — read recorded responses from `tests/fixtures/llm/`. Deterministic.
 - `record` — call live AND write the response to `tests/fixtures/llm/`. Use to refresh fixtures; not for CI.
 
 Most tests run under `replay` or `mock`. Don't add live API calls to the regular test suite.
+
+## Multi-provider (PLAN_MULTI_PROVIDER, harvest.md §16.4.1)
+
+`harvest start` is provider-pluggable. The agent loop drives Vercel AI SDK (`ai` + `@ai-sdk/anthropic|openai|google`); pick a provider via:
+
+1. `--provider <anthropic|openai|google>` flag, else
+2. `HARVEST_PROVIDER` env, else
+3. default `anthropic`.
+
+Default models: `anthropic` → `claude-sonnet-4-6`, `openai` → `gpt-4.1`, `google` → `gemini-2.5-pro`. Override with `--model <id>` flag or `HARVEST_MODEL` env.
+
+API keys are env-only — never accepted as CLI args. Missing key → exit 5 with a clear message.
+
+Replay fixtures must be split per provider (`tests/fixtures/llm/<provider>/...`). Same prompt, different model = different output; don't share fixtures across providers.
 
 ## Architecture (read this before editing imports)
 
@@ -48,11 +62,19 @@ A layer may only import from layers strictly to its right. `claudemd/` is the pe
 
 Concretely:
 - `src/core/` — deterministic IO + KB primitives. May import only `node:` builtins, `yaml`, `picomatch`. No SDK, no Zod runtime in this layer.
-- `src/llm/` — the four `LlmCaller` implementations (`live` / `mock` / `replay` / `record`) sharing one interface. May import `core/` only.
-- `src/tools/` — 13 in-process MCP tools (`discovery/` × 4, `analysis/` × 2, `write/` × 5, `meta/` × 2) plus `server.ts` that wraps them via the Agent SDK's `tool()` + `createSdkMcpServer()`. May import `core/` and `llm/`. Tools return structured envelopes (`{ error, message, suggest, details? } | <success>`) — they almost never throw; rejections are *data* the agent learns from.
-- `src/agent/` — the Agent SDK driver: `runner.ts` calls `query()`, `message-handler.ts` consumes its async-iterable stream into a `RunState`, `system-prompt.ts` holds the §8.2 Korean system prompt verbatim. May import `core/`, `tools/`, `llm/`.
+- `src/llm/` — `LlmCaller` interface + four implementations (`mock` / `replay` / `record` / Vercel AI SDK `live` via `ai-sdk-caller.ts`), plus `providers/` (provider modules for Anthropic / OpenAI / Google). May import `core/` only.
+- `src/tools/` — 13 in-process tools (`discovery/` × 4, `analysis/` × 2, `write/` × 5, `meta/` × 2) plus `server.ts` (spec-verbatim `HARVEST_TOOL_NAMES` + `HarvestServerDeps`). Post Phase 2 the tools are no longer wrapped in an MCP server — `agent/tool-registry.ts` registers them as a Vercel AI SDK `ToolSet`. May import `core/` and `llm/`. Tools return structured envelopes (`{ error, message, suggest, details? } | <success>`) — they almost never throw; rejections are *data* the agent learns from.
+- `src/agent/` — the AI SDK driver: `tool-registry.ts` builds the AI SDK ToolSet, `loop.ts` is the `generateText` wrapper (`runAgentLoop`), `runner.ts` orchestrates locks + INDEX rebuild around the loop, `message-handler.ts` consumes a normalized `StepEvent` union (`init` / `assistant_text` / `tool_call` / `tool_result` / `finish`) into a `RunState`, `system-prompt.ts` holds the §8.2 Korean system prompt verbatim. May import `core/`, `tools/`, `llm/`.
 - `src/cli/` — argv parsing (vendored ~120-line parser in `argv.ts` — no `commander`/`yargs`), command dispatch, exit-code mapping, SIGINT cleanup. May import everything.
-- `src/claudemd/` — splices the `<!-- harvest:knowledge-base --> … <!-- /harvest:knowledge-base -->` marker block into the user's `CLAUDE.md`. Mutations outside that block are forbidden.
+- `src/claudemd/` — splices the `<!-- harvest:knowledge-base -->
+## Knowledge Base
+
+> Resolution rule: more specific (closer) KB wins. If guidance from
+> this app's KB contradicts root KB, follow this app's KB.
+
+@.harvest/INDEX.md
+
+<!-- /harvest:knowledge-base -->` marker block into the user's `CLAUDE.md`. Mutations outside that block are forbidden.
 
 `harvest init` runs entirely on Entry + `claudemd/` + `core/` — it deliberately skips the `agent/` and `tools/` layers (no LLM work). Only `harvest start` exercises the full stack.
 
@@ -73,8 +95,11 @@ Concretely:
 
 | Var | Purpose |
 |---|---|
-| `ANTHROPIC_API_KEY` | Required for `live` mode. Never store in code or argv. |
-| `HARVEST_MODEL` | Override default `claude-sonnet-4-6` in `agent/runner.ts`. |
+| `HARVEST_PROVIDER` | `anthropic` (default) / `openai` / `google`. Wins under `--provider` flag. |
+| `ANTHROPIC_API_KEY` | Required for `live` mode when provider=anthropic. Never store in code or argv. |
+| `OPENAI_API_KEY` | Required for `live` mode when provider=openai. |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | Required for `live` mode when provider=google. |
+| `HARVEST_MODEL` | Override per-provider default model id. |
 | `HARVEST_TRANSCRIPT_DIR` | Override `~/.claude/projects` for transcript discovery. |
 | `HARVEST_TEST_LLM` | `live` (default) / `mock` / `replay` / `record`. |
 | `HARVEST_DEBUG` | `1` to dump raw LLM I/O on stderr. |

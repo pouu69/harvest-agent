@@ -1,12 +1,12 @@
 /**
  * `selectLlmCaller` — dispatches the four caller modes per harvest.md §16.4.
  *
- * | mode    | env var (`HARVEST_TEST_LLM`) | concrete caller                                           |
- * |---------|------------------------------|-----------------------------------------------------------|
- * | mock    | `mock`                       | {@link MockLlmCaller} with `opts.mockResult` (or default) |
- * | replay  | `replay`                     | {@link FixtureLlmCaller} reading `opts.fixturesDir`       |
- * | record  | `record`                     | {@link RecordingLlmCaller}(LiveLlmCaller, fixturesDir)    |
- * | live    | `live` *or unset*            | {@link LiveLlmCaller} talking to the SDK                  |
+ * | mode    | env var (`HARVEST_TEST_LLM`) | concrete caller                                            |
+ * |---------|------------------------------|------------------------------------------------------------|
+ * | mock    | `mock`                       | {@link MockLlmCaller} with `opts.mockResult` (or default)  |
+ * | replay  | `replay`                     | {@link FixtureLlmCaller} reading `opts.fixturesDir`        |
+ * | record  | `record`                     | {@link RecordingLlmCaller}(AiSdkLlmCaller, fixturesDir)    |
+ * | live    | `live` *or unset*            | {@link AiSdkLlmCaller} talking to the active provider      |
  *
  * Resolution order:
  *
@@ -17,8 +17,18 @@
  * An unknown env-var value throws — silently falling back to live could
  * surprise CI by producing real network calls when a typo was meant to
  * disable them.
+ *
+ * Phase 1 of PLAN_MULTI_PROVIDER swaps the legacy `LiveLlmCaller` (bound to
+ * `@anthropic-ai/claude-agent-sdk`) for `AiSdkLlmCaller` (Vercel AI SDK,
+ * provider-pluggable). The interface, modes, and env contract are
+ * unchanged so existing tests (`select.test.ts`, the EXTRACT integration
+ * suite) continue to pass.
  */
 
+import {
+  AiSdkLlmCaller,
+  type AiSdkLlmCallerOptions,
+} from "./ai-sdk-caller.js";
 import {
   isLlmCallerMode,
   type LlmCaller,
@@ -26,7 +36,6 @@ import {
   type LlmCallerResult,
 } from "./caller.js";
 import { FixtureLlmCaller } from "./fixture-caller.js";
-import { LiveLlmCaller, type LiveLlmCallerOptions } from "./live-caller.js";
 import { DEFAULT_MOCK_RESULT, MockLlmCaller } from "./mock-caller.js";
 import { RecordingLlmCaller } from "./recording-caller.js";
 
@@ -35,8 +44,12 @@ export interface SelectLlmCallerOptions {
   fixturesDir?: string;
   /** Result for "mock" mode. Default: empty-items canonical result. */
   mockResult?: LlmCallerResult;
-  /** Live caller construction options (retry / sleep / sdk injection). */
-  liveOptions?: LiveLlmCallerOptions;
+  /**
+   * Live caller construction options (provider, apiKey, retry / sleep /
+   * generateText injection). Forwarded verbatim to {@link AiSdkLlmCaller}
+   * for both `"live"` and `"record"` modes (record wraps a live caller).
+   */
+  liveOptions?: AiSdkLlmCallerOptions;
   /**
    * Override the env-var read for "auto-mode" resolution. Mostly for tests
    * that want to assert the env-fallback path without mutating
@@ -60,11 +73,11 @@ export function selectLlmCaller(
     case "replay":
       return new FixtureLlmCaller(fixturesDir);
     case "record": {
-      const live = new LiveLlmCaller(opts.liveOptions ?? {});
+      const live = new AiSdkLlmCaller(opts.liveOptions ?? {});
       return new RecordingLlmCaller(live, fixturesDir);
     }
     case "live":
-      return new LiveLlmCaller(opts.liveOptions ?? {});
+      return new AiSdkLlmCaller(opts.liveOptions ?? {});
   }
 }
 
@@ -74,8 +87,6 @@ function resolveMode(
 ): LlmCallerMode {
   if (explicit !== undefined) return explicit;
 
-  // Read env via the override if provided so tests can pin behavior without
-  // touching the real process env.
   const envBag = envOverride ?? process.env;
   const raw = envBag.HARVEST_TEST_LLM;
   if (raw === undefined || raw === "") return "live";

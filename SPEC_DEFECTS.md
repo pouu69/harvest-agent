@@ -165,6 +165,31 @@ export function nowIso(): string {
 
 **임시 회피**: Task 20 (`harvest start`) 가 이 코드를 받았을 때 `details.cause` 필드를 보고 진짜 원인을 추론하도록 핸들러 작성.
 
+### I-10. Agent loop 이 Anthropic SDK 에 강결합 → AI SDK 마이그레이션으로 해소
+
+**상태**: ✅ **resolved** (PLAN_MULTI_PROVIDER Phase 1~4 완료)
+
+**원래 결함**: §10.1 / §14.2 의 agent 루프 명세가 `@anthropic-ai/claude-agent-sdk` 의 `query()` + `createSdkMcpServer()` API 를 전제로 작성되어 있었음. 사용자가 OpenAI / Google Gemini 등 다른 provider 를 쓰고 싶어도 모델 패밀리 자체를 교체할 수 없었음 — Bedrock / Vertex 도 모두 Claude 모델만 라우팅.
+
+**위치**:
+- §10.1 line 1761 의 `query()` 호출 예시 (Anthropic SDK 시그니처)
+- §16.4 LLM modes 표 — provider 차원이 없었음
+- §10.5 / §12.2 의 "Agent SDK self-error" 표현 — provider 일반화 안 됨
+- §10.7 모델 선택 정책 — `HARVEST_MODEL` 만 있고 provider 없음
+
+**해소**: PLAN_MULTI_PROVIDER.md 의 5 phase 마이그레이션:
+- Phase 1: `src/llm/providers/{anthropic,openai,google}.ts` + `ai-sdk-caller.ts` (Vercel AI SDK 기반 단발 caller). `LlmCaller` 인터페이스 시그니처 보존.
+- Phase 2: `src/agent/tool-registry.ts` (13 도구 → AI SDK ToolSet) + `src/agent/loop.ts` (`runAgentLoop` = `generateText` 래퍼). `runner.ts` 가 `query()` 대신 `runAgentLoop` 호출.
+- Phase 3: `src/agent/message-handler.ts` 가 정규화된 `StepEvent` union (`init` / `assistant_text` / `tool_call` / `tool_result` / `finish`) 을 받도록 재작성. `RunState` 외부 shape 보존.
+- Phase 4: `harvest start --provider <anthropic|openai|google>` flag, `HARVEST_PROVIDER` env, provider 별 API key env 검증 (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY`). 미설정 → exit 5.
+- Phase 5: §16.4.1 추가 + §10.5 / §10.7 / §12.2 표현 일반화 (이 항목 등록 포함).
+
+**spec 측 변경**: §16.4.1 신설, §10.5 / §10.7 / §12.2 의 "Agent SDK self-error" 를 "LLM provider self-error" 로 일반화. §14.2 의 import layering 은 무변경 (`agent/` 가 추가로 `ai`, `@ai-sdk/*` 의존).
+
+**관련 문서**:
+- DESIGN_PROPOSALS.md `P-4` (✅ 수락)
+- PLAN_MULTI_PROVIDER.md (5 phase 머지 플랜 + 위험 / open questions)
+
 ### I-3. §7.3 INDEX.md 예시 ↔ §18.3 예시의 Status Summary 형태 불일치
 
 **위치**:

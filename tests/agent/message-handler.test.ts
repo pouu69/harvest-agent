@@ -1,16 +1,19 @@
 /**
- * Tests for the SDK message dispatcher (`src/agent/message-handler.ts`).
+ * Tests for the step-event dispatcher (`src/agent/message-handler.ts`).
  *
  * The dispatcher updates a {@link RunState} and emits verbose lines to a
- * caller-provided stderr stream. We exercise each message-type branch (system
- * init / status, assistant tool_use, user tool_result, result success +
- * errors) with the smallest plausible message shape — this matches what the
- * real SDK emits.
+ * caller-provided stderr stream. We exercise each event-type branch (init,
+ * assistant_text, tool_call, tool_result, finish) with the smallest
+ * plausible event shape — this matches what `runAgentLoop` emits.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { handleMessage, type RunState } from "../../src/agent/message-handler.js";
+import {
+  handleStep,
+  type RunState,
+  type StepEvent,
+} from "../../src/agent/message-handler.js";
 
 // --- helpers ---------------------------------------------------------------
 
@@ -33,26 +36,17 @@ function readCaptured(s: NodeJS.WritableStream): string {
   return (s as unknown as CapturedStream).text();
 }
 
-/**
- * The dispatcher accepts SDKMessage shapes structurally — it only reads the
- * fields it needs and tolerates anything else. Tests construct minimal
- * literals; we type them as a dictionary and forward through `handleMessage`'s
- * `any`-typed parameter.
- */
-type FakeMsg = Record<string, unknown>;
-
 function send(
-  msg: FakeMsg,
+  event: StepEvent | Record<string, unknown>,
   state: RunState,
   opts: { verbose?: boolean; stderr: NodeJS.WritableStream },
 ): void {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  handleMessage(msg as any, state, opts);
+  handleStep(event as StepEvent, state, opts);
 }
 
 const ORIGINAL_DEBUG_ENV = process.env.HARVEST_DEBUG;
 
-describe("handleMessage — system.init", () => {
+describe("handleStep — init", () => {
   beforeEach(() => {
     delete process.env.HARVEST_DEBUG;
   });
@@ -65,10 +59,7 @@ describe("handleMessage — system.init", () => {
     const before = Date.now();
     const state: RunState = {};
     const stderr = captured();
-    send({ type: "system", subtype: "init" }, state, {
-      verbose: false,
-      stderr,
-    });
+    send({ type: "init" }, state, { verbose: false, stderr });
     expect(state.startedAt).toBeDefined();
     expect(state.startedAt!).toBeGreaterThanOrEqual(before);
   });
@@ -77,150 +68,78 @@ describe("handleMessage — system.init", () => {
     process.env.HARVEST_DEBUG = "1";
     const state: RunState = {};
     const stderr = captured();
-    send({ type: "system", subtype: "init" }, state, {
-      verbose: false,
-      stderr,
-    });
+    send({ type: "init" }, state, { verbose: false, stderr });
     expect(readCaptured(stderr)).toContain("Agent initialized");
   });
 
   it("does NOT log when HARVEST_DEBUG is unset", () => {
     const state: RunState = {};
     const stderr = captured();
-    send({ type: "system", subtype: "init" }, state, {
-      verbose: false,
-      stderr,
-    });
+    send({ type: "init" }, state, { verbose: false, stderr });
     expect(readCaptured(stderr)).toBe("");
   });
 });
 
-describe("handleMessage — system.status", () => {
-  it("emits a status line in verbose mode only", () => {
-    const stateA: RunState = {};
-    const stderrA = captured();
-    send(
-      { type: "system", subtype: "status", status: "requesting" },
-      stateA,
-      { verbose: true, stderr: stderrA },
-    );
-    expect(readCaptured(stderrA)).toContain("status");
-
-    const stateB: RunState = {};
-    const stderrB = captured();
-    send(
-      { type: "system", subtype: "status", status: "requesting" },
-      stateB,
-      { verbose: false, stderr: stderrB },
-    );
-    expect(readCaptured(stderrB)).toBe("");
-  });
-});
-
-describe("handleMessage — assistant", () => {
-  it("logs each tool_use block in verbose mode", () => {
+describe("handleStep — tool_call", () => {
+  it("logs a one-liner in verbose mode", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
       {
-        type: "assistant",
-        message: {
-          content: [
-            {
-              type: "tool_use",
-              id: "tu_1",
-              name: "mcp__harvest__list_unprocessed_sessions",
-              input: { limit: 5 },
-            },
-            { type: "text", text: "internal thought — must not appear" },
-          ],
-        },
+        type: "tool_call",
+        toolName: "list_unprocessed_sessions",
+        input: { limit: 5 },
       },
       state,
       { verbose: true, stderr },
     );
-    const out = readCaptured(stderr);
-    expect(out).toContain("list_unprocessed_sessions");
-    expect(out).not.toContain("internal thought");
+    expect(readCaptured(stderr)).toContain("list_unprocessed_sessions");
   });
 
-  it("ignores assistant turns entirely in non-verbose mode", () => {
+  it("ignores tool_call entirely in non-verbose mode", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
-      {
-        type: "assistant",
-        message: {
-          content: [
-            { type: "tool_use", id: "tu_1", name: "x", input: {} },
-            { type: "text", text: "blah" },
-          ],
-        },
-      },
+      { type: "tool_call", toolName: "x", input: {} },
       state,
       { verbose: false, stderr },
     );
     expect(readCaptured(stderr)).toBe("");
   });
 
-  it("truncates verbose tool_use input to a reasonable cap", () => {
+  it("truncates verbose tool_call input to a reasonable cap", () => {
     const big = "x".repeat(500);
     const state: RunState = {};
     const stderr = captured();
     send(
-      {
-        type: "assistant",
-        message: {
-          content: [
-            { type: "tool_use", id: "tu_1", name: "t", input: { big } },
-          ],
-        },
-      },
+      { type: "tool_call", toolName: "t", input: { big } },
       state,
       { verbose: true, stderr },
     );
-    // The whole 500-char payload would dominate the line; we cap to keep the
-    // verbose output readable.
     expect(readCaptured(stderr).length).toBeLessThan(300);
   });
 });
 
-describe("handleMessage — user", () => {
-  it("does NOT print on tool result messages (report_progress already emitted)", () => {
+describe("handleStep — assistant_text & tool_result", () => {
+  it("does not surface assistant_text — internal reasoning is private", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
-      {
-        type: "user",
-        message: {
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: "tu_1",
-              content: "{\"acknowledged\":true}",
-            },
-          ],
-        },
-      },
+      { type: "assistant_text", text: "internal thought" },
       state,
-      { verbose: false, stderr },
+      { verbose: true, stderr },
     );
     expect(readCaptured(stderr)).toBe("");
   });
 
-  it("does not reproduce tool-result body even in verbose mode", () => {
-    // The §10.3 contract: tool result rendering is the tool handler's job.
-    // The dispatcher does not double-print the body content.
+  it("does not reproduce tool_result body (handler already wrote)", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
       {
-        type: "user",
-        message: {
-          content: [
-            { type: "tool_result", tool_use_id: "tu_1", content: "{\"acknowledged\":true}" },
-          ],
-        },
+        type: "tool_result",
+        toolName: "report_progress",
+        output: { acknowledged: true },
       },
       state,
       { verbose: true, stderr },
@@ -230,82 +149,79 @@ describe("handleMessage — user", () => {
   });
 });
 
-describe("handleMessage — result", () => {
-  it("captures num_turns / total_cost_usd / subtype on success", () => {
+describe("handleStep — finish", () => {
+  it("captures numSteps + totalCostUsd + resultSubtype on success", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
       {
-        type: "result",
-        subtype: "success",
-        num_turns: 12,
-        total_cost_usd: 0.42,
-        result: "ok",
+        type: "finish",
+        finishReason: "stop",
+        usage: { inputTokens: 100, outputTokens: 50 },
+        numSteps: 12,
       },
       state,
       { verbose: false, stderr },
     );
     expect(state.numTurns).toBe(12);
-    expect(state.totalCostUsd).toBeCloseTo(0.42);
+    expect(state.totalCostUsd).toBe(0); // AI SDK doesn't surface cost yet
     expect(state.resultSubtype).toBe("success");
     expect(state.endedAt).toBeDefined();
   });
 
-  it("captures error_max_turns subtype", () => {
+  it("maps tool-calls finishReason to error_max_turns", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
       {
-        type: "result",
-        subtype: "error_max_turns",
-        num_turns: 300,
-        total_cost_usd: 1.23,
+        type: "finish",
+        finishReason: "tool-calls",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        numSteps: 300,
       },
       state,
       { verbose: false, stderr },
     );
     expect(state.resultSubtype).toBe("error_max_turns");
     expect(state.numTurns).toBe(300);
-    expect(state.totalCostUsd).toBeCloseTo(1.23);
   });
 
-  it("normalizes a generic error subtype to 'error'", () => {
-    // SDKResultError has subtypes like 'error_during_execution', etc. The
-    // RunState carries a coarser "success" | "error_max_turns" | "error"
-    // tri-state — anything that isn't success or max_turns is just "error".
+  it("maps any other finishReason to 'error'", () => {
+    for (const reason of ["length", "content-filter", "error", "other", "unknown"]) {
+      const state: RunState = {};
+      const stderr = captured();
+      send(
+        {
+          type: "finish",
+          finishReason: reason,
+          numSteps: 7,
+        },
+        state,
+        { verbose: false, stderr },
+      );
+      expect(state.resultSubtype).toBe("error");
+    }
+  });
+
+  it("uses the explicit totalCostUsd when provided", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
       {
-        type: "result",
-        subtype: "error_during_execution",
-        num_turns: 7,
-        total_cost_usd: 0.05,
+        type: "finish",
+        finishReason: "stop",
+        numSteps: 1,
+        totalCostUsd: 0.42,
       },
       state,
       { verbose: false, stderr },
     );
-    expect(state.resultSubtype).toBe("error");
-  });
-
-  it("treats missing total_cost_usd as 0", () => {
-    const state: RunState = {};
-    const stderr = captured();
-    send(
-      {
-        type: "result",
-        subtype: "success",
-        num_turns: 1,
-      },
-      state,
-      { verbose: false, stderr },
-    );
-    expect(state.totalCostUsd).toBe(0);
+    expect(state.totalCostUsd).toBeCloseTo(0.42);
   });
 });
 
-describe("handleMessage — unknown types", () => {
-  it("ignores unknown message types without throwing", () => {
+describe("handleStep — unknown / malformed", () => {
+  it("ignores unknown event types without throwing", () => {
     const state: RunState = {};
     const stderr = captured();
     expect(() =>
@@ -313,9 +229,12 @@ describe("handleMessage — unknown types", () => {
     ).not.toThrow();
   });
 
-  it("ignores malformed messages (null/missing type)", () => {
+  it("ignores malformed events (null / missing type)", () => {
     const state: RunState = {};
     const stderr = captured();
+    expect(() =>
+      handleStep(null, state, { verbose: false, stderr }),
+    ).not.toThrow();
     expect(() =>
       send({ noType: true }, state, { verbose: false, stderr }),
     ).not.toThrow();

@@ -78,6 +78,7 @@ async function main(): Promise<number> {
     if (parsed.flags.recent !== undefined) startOpts.recent = parsed.flags.recent;
     if (parsed.flags.since !== undefined) startOpts.since = parsed.flags.since;
     if (parsed.flags.model !== undefined) startOpts.model = parsed.flags.model;
+    if (parsed.flags.provider !== undefined) startOpts.provider = parsed.flags.provider;
     return runStart(startOpts);
   }
 
@@ -102,10 +103,19 @@ Start flags:
   --discover <path>   Discover .harvest/ under <path>.
   --recent <N>        Process only the most recent N unprocessed sessions.
   --since <ISO8601>   Only sessions after this time.
-  --model <name>      Override the LLM model.
+  --provider <name>   LLM provider: anthropic | openai | google
+                      (default: $HARVEST_PROVIDER, else anthropic).
+  --model <name>      Override the LLM model id (provider-specific).
   --dry-run           Don't write anything; report only.
   --verbose           Verbose progress logging.
   --json              Machine-readable output.
+
+Environment (per provider):
+  ANTHROPIC_API_KEY            Required when provider=anthropic.
+  OPENAI_API_KEY               Required when provider=openai.
+  GOOGLE_GENERATIVE_AI_API_KEY Required when provider=google.
+  HARVEST_PROVIDER             Default provider when --provider is unset.
+  HARVEST_MODEL                Default model id (provider-specific).
 
 Global:
   -h, --help          Print help.
