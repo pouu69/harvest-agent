@@ -42,12 +42,18 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 요약:
 
 - **🔴 B-1** §3.2 `nowIso()` snippet 이 UTC 슬라이스 + 로컬 offset → round-trip 9시간 어긋남
+- **🔴 B-2** `list_unprocessed_sessions` "첫 user 메시지 cwd" 사전 필터 → multi-cwd 세션 false negative (지식 유실)
 - **🟡 I-1** 기본 모델 이름 §10/§14 (`claude-sonnet-4-6`) vs §12 (`claude-sonnet-latest`) 불일치
 - **🟡 I-2** §14.3 `zod: ^3` ↔ 실제 SDK peer-dep `zod: ^4`
 - **🟡 I-3** §7.3 INDEX 예시 (Archived 줄 생략) ↔ §18.3 예시 (`Archived: 0 items` 명시) 불일치
+- **🟡 I-4** `harvest start` 기본 스코프: §12.1 (cwd 기반) ↔ §9.3 (`~/.claude/projects/` 전수)
 - **🟢 S-1~S-3** v1.x 잔재 stale section reference (`§8.5.1`, `§8.6.1`, `§8.7`)
-- **⚪ O-1** Agent SDK `unstable_v2_prompt` API 위험 (Task 17 직전 검증 필수)
+- **🟢 S-5** §11.1 예시의 `trivial-deterministic` (v2.3 enum 단순화 미반영)
+- **🟢 S-6** §8 Playbook 의 유령 도구명 `demote_item` (catalog 는 `promote_item(direction)` 통합)
+- **🟢 S-7** `product.md` ↔ `harvest.md` "MCP" 스코프 충돌 (외부 인터페이스 vs in-process)
+- **⚪ O-1** Agent SDK `unstable_v2_prompt` ✅ **검증 완료** (SDK 0.2.119 export 확인)
 - **⚪ O-2** vitest 빈 테스트 셋 exit 1
+- **⚪ O-3** Agent SDK `tool()` 의 inputSchema 는 Zod **raw shape** (z.object 아님)
 - **🟡 D-1** §18.1 예시의 yaml flow style ↔ yaml@2 default block style
 
 새 task 진행 중 결함 발견 시 `SPEC_DEFECTS.md` 에 추가하고 prefix 별 ID 부여 (`B-`/`I-`/`S-`/`O-`/`D-`).

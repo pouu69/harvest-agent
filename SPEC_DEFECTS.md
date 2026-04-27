@@ -48,6 +48,24 @@ export function nowIso(): string {
 }
 ```
 
+### B-2. `list_unprocessed_sessions` 의 "첫 user 메시지 cwd" 사전 필터 false negative
+
+**위치**: §9.3 lines 1059–1064, 1120
+
+**원문**:
+> 2. 각 transcript의 첫 user 메시지에서 cwd 추출 (= dominant cwd, §9.3 sessions[].cwd 정의와 일치)
+> 3. **`findKbChain(cwd)` 호출 → 빈 배열이면 결과 목록에서 제외**
+
+**문제**: 한 세션에서 사용자가 여러 디렉토리를 오갔을 경우 (예: 처음에 `/tmp/scratch` 에서 시작 → 도중에 `cd ~/projects/myapp` 진입), "첫 user 메시지의 cwd" 기준이면 KB 체인이 빈 `/tmp/scratch` 가 dominant 로 잡혀 사전 필터에서 *전체 세션 누락*. 정작 분석 가치가 큰 myapp 작업이 통째로 사라짐 (지식 유실).
+
+`read_transcript` 의 dominant cwd 정의 (line 1120: "가장 빈번") 와도 어긋남 — 한쪽은 "첫 등장", 다른 쪽은 "최빈".
+
+**보정 권장**: 사전 필터 로직을 다음 중 하나로 변경:
+- **Option A (안전)**: transcript 의 *모든* `cwd` 를 한 번 훑어, 하나라도 비어있지 않은 KB 체인이 있으면 해당 세션을 "분석 후보" 로 유지. 이후 `read_transcript` 가 multi-cwd 판정으로 적절히 처리.
+- **Option B (간단)**: dominant cwd 정의를 "첫 등장" → "최빈 (first-encounter tiebreak)" 로 통일하여 `read_transcript` 와 매칭. 다만 *최빈도* repo 밖이면 여전히 누락 가능.
+
+**구현 영향**: Task 14 (`list_unprocessed_sessions`) 가 현재 spec 그대로 첫 cwd 사전 필터로 진행 중. 본 결함 확인 후 follow-up 으로 Option A 적용 권장. 테스트로 multi-cwd 세션의 유실 여부를 직접 검증 필요.
+
 ---
 
 ## 🟡 Inconsistency
@@ -65,6 +83,22 @@ export function nowIso(): string {
 - 또는 의도가 "최신을 자동 추적" 이라면 §10 / §14 / §18 을 `claude-sonnet-latest` 로 갱신 (단, "latest" alias 가 SDK 측에서 지원되는지 확인 필요).
 
 구현은 §10.1 의 `claude-sonnet-4-6` 을 default 로 잡을 것. (Task 17, Task 20 시점에 결정 필요.)
+
+### I-4. `harvest start` 기본 스코프: §12.1 (cwd 기반) ↔ §9.3 (`~/.claude/projects/` 전수)
+
+**위치**:
+- §12.1 line 2115 — `harvest start --discover <PATH>`: "지정 경로 하위에서 모든 `.harvest/` 자동 탐색 (cwd 무시)" — 즉 `--discover` 가 *없으면* cwd 기반.
+- §9.3 lines 1059–1062 — `list_unprocessed_sessions` 동작: "`~/.claude/projects/` 스캔 → ... 각 transcript의 첫 user 메시지에서 cwd 추출"
+
+**문제**: CLI 의도는 "현재 프로젝트의 transcript 만" 인데, 도구 자체는 `~/.claude/projects/` 전체를 스캔. 사전 필터 (`findKbChain`) 가 부분적으로 막아주지만, "현재 프로젝트와 무관한 다른 KB 가 있는 transcript" 도 통과하여 의도치 않은 KB 가 갱신될 위험.
+
+**예**: 사용자가 `~/projects/myapp` 에서 `harvest start` 실행 → 도구는 `~/.claude/projects/` 의 모든 transcript 를 스캔 → `~/projects/other-app` 의 transcript 도 그곳의 `.harvest/` 가 KB 체인으로 발견되면 미처리로 분류되어 처리됨. 사용자는 `myapp` 만 갱신될 것으로 기대.
+
+**보정 권장**:
+- `list_unprocessed_sessions` 입력에 `cwd_filter?: string` 추가. 호출자 (Task 20 `harvest start`) 가 `--discover` 가 없을 때 `process.cwd()` 를 전달, 도구는 transcript 의 cwd 가 그 하위인 것만 유지.
+- 또는 §12.1 prose 에 "기본 동작도 `~/.claude/projects/` 전수 스캔" 으로 의도 명시.
+
+**구현 영향**: Task 14 가 현재 cwd 필터 없이 spec 그대로 진행 중 (위험 낮음 — 사전 필터가 KB 없는 transcript 는 자동 제외). Task 20 (`harvest start`) 시점에 `cwd_filter` 옵션 추가 또는 §12.1 의도 명확화 필요.
 
 ### I-3. §7.3 INDEX.md 예시 ↔ §18.3 예시의 Status Summary 형태 불일치
 
@@ -147,25 +181,86 @@ v1.x 의 §8 은 "5단계 LLM 파이프라인" 으로 `§8.5.1`, `§8.6.1`, `§8
 
 **보정 불필요**.
 
+### S-5. `processed.json` 예시의 `trivial-deterministic` (v1.x 잔재)
+
+**위치**:
+- §11.1 line 1959 — enum 정의: `"trivial"`, `"low-value"`, `"transcript-corrupt"`, `"other"`, `"multi-kb-session"`, `null`
+- §11.1 (또는 §18.3 부근) line ~3023 — 예시 entry: `"skipped_reason": "trivial-deterministic"` (구 v1.x 명칭)
+- v2.3 changelog line 3423 — "기존 `trivial-deterministic` → `trivial` 단순화" 명시되어 있음
+
+**문제**: enum 은 `trivial` 로 통일됐지만 예시 한 곳이 미반영. 구현자가 예시만 보고 따라가면 schema_violation 에러 발생.
+
+**구현 회피**: Task 10 (`src/core/types.ts`) 와 Task 16 (`mark_session_processed`) 모두 v2.3 enum 기준 (`trivial`, `low-value`, ...) 으로 진행.
+
+**보정 권장**: §11.1 (또는 해당 위치) 의 예시에서 `trivial-deterministic` → `trivial`, `low-value-llm` → `low-value` 로 일괄 치환.
+
+### S-6. `§8` Playbook 의 유령 도구명 `demote_item`
+
+**위치**: §8 흐름도/설명 lines 827, 938, 1547, 1570 (대략) — `demote_item` 직접 표기
+
+**현실**: §9.5 Tool 카탈로그에는 `demote_item` 도구 없음. demotion 은 `promote_item({ direction: "demote", ... })` 로 통합 처리. v1.x 의 별도 도구 표현이 §8 prose 에 잔존.
+
+**구현 영향**: 구현자가 §8 만 보고 `demote_item` Zod 스키마/핸들러를 추가 시도 → §9.5 의 promote_item 과 중복/충돌. Task 15 implementer 에게 "demotion 은 promote_item 의 direction 옵션" 으로 명시 필요.
+
+**보정 권장**: §8 의 `demote_item` 등장을 모두 `promote_item(direction:"demote")` 로 일괄 치환.
+
+### S-7. `product.md` ↔ `harvest.md` 의 "MCP" 용어 충돌 (도큐 외부)
+
+**위치** (참고용 — `harvest.md` 자체 결함 아님):
+- `product.md` line 160 — "MCP 서버 인터페이스 미포함"
+- `harvest.md` line 1760, 2834 — in-process MCP (`createSdkMcpServer`) 가 핵심 구현 패턴
+
+**문제**: `product.md` 는 외부 사용자 pitch 문서로 "MCP 외부 노출 안 함" 의도; `harvest.md` 는 내부 구현 디테일로 "in-process MCP 활용". 두 "MCP" 가 다른 스코프인데 같은 용어를 사용하여 독자 혼선.
+
+**보정 권장**: `product.md` 의 문구를 "**외부 공개 MCP 인터페이스 미포함**" 으로 좁힘. `harvest.md` 변경 불필요.
+
+**참고**: `product.md` 는 git untracked 상태이므로 본 프로젝트 spec docs 에 직접 포함 X. 향후 release 문서화 시점에 다듬을 사항.
+
 ---
 
 ## ⚪ Outdated Fact
 
-### O-1. Agent SDK `unstable_v2_prompt` API 위험
+### O-1. Agent SDK `unstable_v2_prompt` API 위험 — ✅ **검증 완료 (2026-04-27)**
 
 **위치**: §14.1 lines 2280–2306, §18.6 lines 3060–3081
 
-**원문**:
-```typescript
-import { unstable_v2_prompt } from "@anthropic-ai/claude-agent-sdk";
+**검증 결과**: `@anthropic-ai/claude-agent-sdk@0.2.119` 가 `unstable_v2_prompt` / `unstable_v2_createSession` / `unstable_v2_resumeSession` 모두 export. Type 정의 (`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts:5361`):
 
-const result = await unstable_v2_prompt(
-  buildExtractUserPrompt(...),
-  { systemPrompt: ..., model: ..., mcpServers: { extract: ... }, allowedTools: [...], ... }
-);
+```typescript
+export declare function unstable_v2_prompt(
+  _message: string,
+  _options: SDKSessionOptions
+): Promise<SDKResultMessage>;
 ```
 
-**문제**: `unstable_` 접두사는 *버전 간 변경/제거 가능* 의 공식 신호. 현재 SDK 0.2.119 가 export 하는지 *Task 17 직전* 검증 필요. 만약 export 안 되면 nested `query()` (`maxTurns: 2` + `allowedTools: ["mcp__extract__emit_items"]`) 패턴으로 대체.
+Task 17 은 plan §18.6 의 호출 형태를 그대로 사용 가능. fallback (nested `query()` 패턴) 불필요.
+
+**잔여 위험**: `unstable_` 접두사는 여전히 minor 업데이트마다 깨질 수 있음 — Task 22b (Recording/Replay LLM 모드) 에서 `LlmCaller` 인터페이스로 추상화하여 SDK 변경 충격 흡수 권장.
+
+### O-3. Agent SDK `tool()` 의 inputSchema 는 Zod **raw shape**, 아닌 ZodObject
+
+**위치**: §10.1 (line ~1764+), §18.6, plan 곳곳에서 `tool({ inputSchema: z.object({...}) })` 형태로 시사
+
+**현실** (`sdk.d.ts:5279`):
+```typescript
+export declare function tool<Schema extends AnyZodRawShape>(
+  _name: string,
+  _description: string,
+  _inputSchema: Schema,        // ← AnyZodRawShape, 즉 { foo: z.string(), ... } 객체
+  _handler: (args: InferShape<Schema>, extra: unknown) => Promise<CallToolResult>,
+  _extras?: { ... }
+): SdkMcpToolDefinition<Schema>;
+```
+
+즉 4-arg positional 함수: `tool(name, description, rawShape, handler)`. `rawShape` 은 `z.object({...})` 의 인자가 되는 plain object.
+
+**구현 영향**:
+- Task 14 / 16 / 17 가 `z.object({...})` 로 schema 를 export 한 상태라면, Task 18 (MCP wrap) 에서 `.shape` 으로 raw 추출 후 `tool()` 에 전달해야 함.
+- 또는 처음부터 raw shape 으로 export (`export const inputSchema = { ... };`) 하면 더 깔끔.
+
+**권장**: Tasks 14 / 16 / 17 은 `z.object({...})` 로 schema 를 export 한 채 두고, Task 18 가 `tool(name, desc, schema.shape, handler)` 로 wrap. 단위 테스트는 `z.object` 형태가 더 직관적.
+
+### I-2. §14.3 `zod: ^3` vs 실제 SDK peer-dep `zod: ^4`
 
 **검증 명령**:
 ```bash
