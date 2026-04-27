@@ -1,7 +1,7 @@
 # Harvest 구현 진행 현황
 
 > 본 문서는 `harvest.md` (v2.3) 의 §19 22단계 (실제로는 25개 — Task 22 를 4개로 분해) 를 phase 단위로 추적한다.
-> Task 1–12 는 완료. Task 13 부터 재개할 때 본 문서를 참조해 컨텍스트를 즉시 회복한다.
+> Task 1–13 은 완료 (Phase 1 종료). Task 14+ 부터 재개할 때 본 문서를 참조해 컨텍스트를 즉시 회복한다.
 
 ## 작업 방식
 
@@ -32,8 +32,9 @@
 | 10 | processed.json | `9b0774a` | `src/core/atomic-write.ts` (`atomicWrite` — temp + rename) + `src/core/processed.ts` (`readProcessed`/`writeProcessed`/`isAlreadyProcessed`/`upsertSession`/`markSessionAcrossKbs`/`ProcessedSchemaError`). `(session_id, sha256)` 멱등성, 다중 KB 동기 기록 (per-KB filter `kb_actions`), schema_version=1 검증. 27 tests. atomic-write 위치는 plan §14.2 의 `src/core/kb/` → `src/core/` 로 이동 (lock + processed 둘 다 사용 → 상위 위치 정당화). |
 | 11 | Lock | `0d8a449` | `src/core/lock.ts` (`acquireLock`/`releaseLock`/`LockBlockedError`/`LockReleaseMismatchError`/`LockBlockedReason`/`LockHandle`/`LockInfo`/`AcquireLockOptions`). `O_EXCL` (`flag:"wx"`) 로 race-free, ESRCH/EPERM/host-mismatch 분기, 24h mtime stale 임계값, single-retry livelock 가드. 14 tests (`_kill`/`_mtimeMs` 주입 시감). |
 | 12 | INDEX builder | `a9ea8d4` (+ archived/regex polish) | `src/core/kb/index-builder.ts` (`buildIndexMarkdown`, `BuildIndexOptions`, `BuildIndexResult`). frontmatter scan, active 필터, `updated` desc + `id` asc 정렬, 4-col 표 (AP +Severity), Critical cap=5 + paths shortlist, summary 60자 truncate, MM-DD/YYYY-MM-DD 자동, Status Summary (Archived 항상 emit, **I-3** 참조), `_(none)_` 빈 critical, 200줄 soft cap. 17 tests. |
+| 13 | `harvest init` | `bbe5ebc` (+ scan kb_path / idempotent doc / scan return-code fixes) | `src/cli/argv.ts` (`parseArgs`/`ParsedArgs`/`ArgvParseError`), `src/cli/init.ts` (`runInit`/`InitOptions` — 단일 KB / `--scan` 모노레포 자동 감지: pnpm-workspace.yaml, package.json#workspaces, turbo.json, nx.json bail-out, Cargo.toml, go.work; CLAUDE.md marker block 삽입/교체 보존), `src/cli/index.ts` (entry-point dispatcher, `--help`/`--version`). 29 tests (19 argv + 10 init). 비대화형 `--scan` (전체 생성). `--root` 은 `<!-- harvest:root-kb -->` 주석. tsup banner shebang. **Phase 1 완료.** |
 
-테스트: 175/175 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
+테스트: 204/204 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
 
 ### 발견된 spec 결함 → [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) 참고
 
@@ -55,13 +56,9 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 
 ## 🚧 남은 Task — Phase 별 정리
 
-### Phase 1 잔여 (기초 인프라 / 결정론 코어)
+### Phase 1 (기초 인프라 / 결정론 코어) — ✅ 완료
 
-| # | Task | 핵심 산출물 | 의존성 | 참조 |
-|---|---|---|---|---|
-| 13 | `harvest init` | `src/cli/init.ts` + argv parser (§14.5) — `.harvest/` + 4 카테고리 dir + `.archive/` + `.state/` 생성, CLAUDE.md marker block 추가, `--scan` 모노레포 자동 감지 (`pnpm-workspace.yaml`/`turbo.json`/`nx.json`/...) | Task 5, Task 11, Task 12 | §12.1, §13, §14.5 |
-
-> Phase 1 끝나면 *결정론 코어 + 빈 KB 생성* 까지 가능. 아직 LLM 호출 0.
+> 결정론 코어 + 빈 KB 생성 (LLM 호출 0) 까지 가능. Phase 2 부터 in-process MCP 도구 + LLM 호출.
 
 ### Phase 2 — 도구 (in-process MCP)
 
@@ -96,7 +93,7 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 
 ## Phase 별 재개 권장 순서
 
-1. **Phase 1 잔여 (Task 13, 1개)** — `harvest init` CLI. Phase 1 의 마지막 task — 결정론 코어 완성.
+1. ~~Phase 1~~ ✅ 완료 (Task 1–13).
 2. **Phase 2 (Task 14–18, 5개)** — 도구 5개 + 5개 + 2개 + LLM 도구 1개 + MCP wrap. Task 17 만 새 SDK 위험 존재. 17 직전에 SDK export 사전 검증 필요.
 3. **Phase 3 (Task 19–21, 3개)** — Agent SDK `query()` 실호출 시작. 환경변수 `ANTHROPIC_API_KEY` 가 있는 환경에서만 end-to-end 검증 가능. mock 모드로도 빌드 검증 가능.
 4. **Phase 4 (Task 22a–22d, 4개)** — 안정성/품질/배포. 이전 Phase 결과 반영해 픽스처/문서 작성.

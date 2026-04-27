@@ -251,6 +251,25 @@ describe("runInit (--scan)", () => {
     const out = captured(stdout);
     expect(out).toContain("Detected workspaces (pnpm-workspace.yaml)");
     expect(out).toContain("✓ Created .harvest/ in 4 locations");
+
+    // §7.3: each workspace's INDEX.md must encode kb_path *relative to the
+    // repo root* so the value is meaningful in a chain (apps/web/.harvest
+    // rather than just .harvest). Regression test for the scan-mode anchor.
+    const rootIndex = readFileSync(
+      path.join(root, ".harvest", "INDEX.md"),
+      "utf8",
+    );
+    expect(rootIndex).toMatch(/kb_path:\s*\.harvest\b/);
+    const webIndex = readFileSync(
+      path.join(root, "apps", "web", ".harvest", "INDEX.md"),
+      "utf8",
+    );
+    expect(webIndex).toMatch(/kb_path:\s*apps\/web\/\.harvest\b/);
+    const uiIndex = readFileSync(
+      path.join(root, "packages", "ui", ".harvest", "INDEX.md"),
+      "utf8",
+    );
+    expect(uiIndex).toMatch(/kb_path:\s*packages\/ui\/\.harvest\b/);
   });
 
   it("detects package.json workspaces array", async () => {

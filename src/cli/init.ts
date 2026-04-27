@@ -25,9 +25,12 @@
  *     surfaces as a `<!-- harvest:root-kb -->` comment inside the marker
  *     block. No structural difference yet — Task 21 will use it when the
  *     chain-import enhancement lands.
- *   - **Idempotency on re-run**: a `.harvest/` that already exists is left
- *     alone; we still print success and return 0. CLAUDE.md is similarly
- *     refreshed in-place so re-running after editing the file is safe.
+ *   - **Idempotency on re-run**: a `.harvest/` that already exists is a
+ *     no-op — we print "Already initialized" and return 0 *without* touching
+ *     INDEX.md or CLAUDE.md. To repair a damaged CLAUDE.md marker block,
+ *     remove `.harvest/` and re-init, or wait for `harvest start` (Task 20)
+ *     which rebuilds INDEX after each run and (Task 21) refreshes the
+ *     CLAUDE.md chain imports.
  *   - **Scan on a repo with no monorepo config**: we print "No monorepo
  *     config detected" and fall through to the single-KB flow at `cwd`.
  *
@@ -84,6 +87,14 @@ export async function runInit(opts: InitOptions): Promise<number> {
 async function runInitSingle(
   targetCwd: string,
   opts: InitOptions,
+  /**
+   * Anchor that `kb_path` in the rendered INDEX frontmatter is computed
+   * relative to. Passed through by `runInitScan` so each workspace's INDEX
+   * gets a chain-meaningful identifier like `apps/web/.harvest` (matching
+   * the §7.3 example) instead of every workspace claiming `.harvest`.
+   * Defaults to `targetCwd` (single-KB mode at the repo root).
+   */
+  repoRoot?: string,
 ): Promise<number> {
   const kbPath = path.join(targetCwd, ".harvest");
 
@@ -106,9 +117,10 @@ async function runInitSingle(
   }
 
   // Write an empty INDEX.md via Task 12's builder. `kbPathDisplay` is
-  // computed relative to `cwd`; for a fresh init at the repo root that's
-  // just `.harvest`.
-  const kbPathDisplay = path.relative(targetCwd, kbPath) || ".harvest";
+  // computed relative to the repo root (so monorepo workspaces show up as
+  // `apps/web/.harvest` per §7.3, not just `.harvest`).
+  const anchor = repoRoot ?? targetCwd;
+  const kbPathDisplay = path.relative(anchor, kbPath) || ".harvest";
   const { content } = buildIndexMarkdown({
     kbPath,
     nowIso: opts.nowIso,
@@ -273,8 +285,14 @@ async function runInitScan(opts: InitOptions): Promise<number> {
       // are leaves; spec doesn't say anything about marking each as a root,
       // and that would be incoherent.)
       const isRoot = path.resolve(ws) === rootAbs && opts.root;
-      await runInitSingle(ws, { ...opts, root: isRoot });
-      created += 1;
+      // Anchor `kb_path` frontmatter at the repo root so each workspace's
+      // INDEX frontmatter shows e.g. `apps/web/.harvest` per §7.3 instead
+      // of every workspace's INDEX claiming `.harvest`.
+      const code = await runInitSingle(ws, { ...opts, root: isRoot }, rootAbs);
+      // `runInitSingle` currently never returns non-zero, but if a future
+      // code path ever does we want the count to reflect actual successes
+      // rather than silently overstating.
+      if (code === 0) created += 1;
     } catch (err) {
       // Per spec — log and continue. Don't fail the whole scan if one
       // workspace dir is broken (missing, permission denied, etc.).
