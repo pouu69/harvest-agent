@@ -49,6 +49,38 @@ import {
 // Schema & types
 // -----------------------------------------------------------------------------
 
+// SPEC_DEFECTS I-11: discriminated union on `category` so `severity` is
+// schema-allowed only on the anti-pattern variant. See create-item.ts for
+// the rationale (LLM contract + Zod auto-strip on misbehaving models).
+const promotedItemBase = {
+  title_slug: z
+    .string()
+    .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/)
+    .max(32),
+  summary: z.string().min(1).max(60),
+  body_markdown: z
+    .string()
+    .min(50)
+    .max(8000)
+    .refine((b) => /^## [A-Z]/m.test(b), "must contain English ## heading"),
+  tags: z
+    .array(z.string().regex(/^[a-z][a-z0-9_]*$/))
+    .min(1)
+    .max(5),
+  paths: z.array(z.string()),
+} as const;
+
+const promotedAntiPatternSchema = z.object({
+  category: z.literal("anti-pattern"),
+  ...promotedItemBase,
+  severity: z.enum(["critical", "normal"]).optional(),
+});
+
+const promotedNonAntiPatternSchema = z.object({
+  category: z.enum(["decision", "learning", "reusable"]),
+  ...promotedItemBase,
+});
+
 export const promoteItemInputSchema = z
   .object({
     direction: z.enum(["promote", "demote"]),
@@ -61,25 +93,10 @@ export const promoteItemInputSchema = z
       )
       .min(1),
     target_kb: z.string(),
-    promoted_item: z.object({
-      category: z.enum(["decision", "learning", "reusable", "anti-pattern"]),
-      title_slug: z
-        .string()
-        .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/)
-        .max(32),
-      summary: z.string().min(1).max(60),
-      body_markdown: z
-        .string()
-        .min(50)
-        .max(8000)
-        .refine((b) => /^## [A-Z]/m.test(b), "must contain English ## heading"),
-      tags: z
-        .array(z.string().regex(/^[a-z][a-z0-9_]*$/))
-        .min(1)
-        .max(5),
-      paths: z.array(z.string()),
-      severity: z.enum(["critical", "normal"]).optional(),
-    }),
+    promoted_item: z.discriminatedUnion("category", [
+      promotedAntiPatternSchema,
+      promotedNonAntiPatternSchema,
+    ]),
   })
   .superRefine((input, ctx) => {
     if (input.direction === "promote") {
@@ -224,12 +241,17 @@ async function handlePromote(
     };
   }
 
-  // 3. Cap, severity, id, paths.
+  // 3. Cap, severity, id, paths. severity is type-gated on the
+  //    anti-pattern variant (discriminated union); read it via a
+  //    category guard so the non-anti-pattern branches never carry it.
+  const promotedItem = data.promoted_item;
+  const promotedSeverity =
+    promotedItem.category === "anti-pattern" ? promotedItem.severity : undefined;
   const plan = await planNewItem({
     targetKb: data.target_kb,
-    category: data.promoted_item.category,
-    severity: data.promoted_item.severity,
-    paths: data.promoted_item.paths,
+    category: promotedItem.category,
+    severity: promotedSeverity,
+    paths: promotedItem.paths,
     chain,
     nowIso,
   });
@@ -240,13 +262,13 @@ async function handlePromote(
     kbPath: data.target_kb,
     itemId: plan.newId,
     category: plan.category,
-    titleSlug: data.promoted_item.title_slug,
-    summary: data.promoted_item.summary,
-    body: data.promoted_item.body_markdown,
-    tags: data.promoted_item.tags,
+    titleSlug: promotedItem.title_slug,
+    summary: promotedItem.summary,
+    body: promotedItem.body_markdown,
+    tags: promotedItem.tags,
     pathsNormalized: plan.pathsNormalized,
     universality: "universal",
-    severity: data.promoted_item.severity,
+    severity: promotedSeverity,
     createdAt: plan.createdAt,
   });
 
@@ -383,12 +405,16 @@ async function handleDemote(
     );
   }
 
-  // 3. Cap, severity, id, paths.
+  // 3. Cap, severity, id, paths. severity is type-gated on the
+  //    anti-pattern variant (discriminated union); category guard.
+  const promotedItem = data.promoted_item;
+  const promotedSeverity =
+    promotedItem.category === "anti-pattern" ? promotedItem.severity : undefined;
   const plan = await planNewItem({
     targetKb: data.target_kb,
-    category: data.promoted_item.category,
-    severity: data.promoted_item.severity,
-    paths: data.promoted_item.paths,
+    category: promotedItem.category,
+    severity: promotedSeverity,
+    paths: promotedItem.paths,
     chain,
     nowIso,
   });
@@ -409,20 +435,20 @@ async function handleDemote(
 
   // 5. Write the new app-specific item in target_kb (with history line).
   const newBody = insertHistoryEntry(
-    data.promoted_item.body_markdown,
+    promotedItem.body_markdown,
     `${plan.createdAt}: demoted from root KB (was ${origin.item_id})`,
   );
   const { filePath: newFilePath } = await composeNewItemFile({
     kbPath: data.target_kb,
     itemId: plan.newId,
     category: plan.category,
-    titleSlug: data.promoted_item.title_slug,
-    summary: data.promoted_item.summary,
+    titleSlug: promotedItem.title_slug,
+    summary: promotedItem.summary,
     body: newBody,
-    tags: data.promoted_item.tags,
+    tags: promotedItem.tags,
     pathsNormalized: plan.pathsNormalized,
     universality: "app-specific",
-    severity: data.promoted_item.severity,
+    severity: promotedSeverity,
     createdAt: plan.createdAt,
   });
 

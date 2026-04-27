@@ -221,8 +221,7 @@ describe("runAgentLoop — abortSignal", () => {
     let receivedSignal: AbortSignal | undefined;
 
     const fakeGenerateText: GenerateTextLoopFn = async (args) => {
-      receivedSignal = (args as unknown as { abortSignal?: AbortSignal })
-        .abortSignal;
+      receivedSignal = args.abortSignal;
       return {
         text: "",
         toolCalls: [],

@@ -113,6 +113,13 @@ export interface RunAgentOptions {
   discover?: string;
   /** Optional: dry-run flag (currently advisory — printed in the kickoff). */
   dryRun?: boolean;
+  /**
+   * External `AbortSignal`. When fired (typically the CLI's SIGINT
+   * handler), the runner aborts the in-flight `generateText` call
+   * cooperatively. The runner's `finally` still runs — locks released,
+   * INDEX rebuilt, partial results committed.
+   */
+  abortSignal?: AbortSignal;
   /** Optional: verbose flag (verbose dispatcher output). */
   verbose?: boolean;
   /** Where to write progress lines. Default: process.stdout. */
@@ -136,8 +143,17 @@ export interface RunAgentResult {
   exitCode: 0 | 1 | 4 | 5;
   numTurns?: number;
   totalCostUsd?: number;
+  /** Total input / output tokens reported by the loop. Surfaced so the
+   *  CLI summary line can show real usage instead of an always-zero
+   *  `$0.0000` cost (AI SDK doesn't normalize cost across providers). */
+  inputTokens?: number;
+  outputTokens?: number;
   /** Coarse tri-state from {@link RunState}. */
   resultSubtype?: RunState["resultSubtype"];
+  /** True if the run terminated because the external `abortSignal` fired
+   *  (typically the CLI's SIGINT handler). The CLI layer maps this to
+   *  exit 130 without polluting the runner's exit-code union. */
+  aborted?: boolean;
 }
 
 // -----------------------------------------------------------------------------
@@ -210,12 +226,42 @@ export async function runAgent(
     });
 
     // ---- 5. Run the agent loop -------------------------------------------
+    //
+    // The dispatcher (`handleStep`) sets `state.abortReason` when it
+    // detects a tool-loop pattern (same `(toolName, errorCode)` ≥
+    // ERROR_STREAK_ABORT_THRESHOLD times in a row). We bridge that signal
+    // to AI SDK by calling `controller.abort()` on the shared
+    // AbortController; AI SDK then rejects `generateText` with an
+    // AbortError on the next async boundary, which the catch below
+    // distinguishes from a genuine provider self-error.
     const state: RunState = {};
+    const controller = new AbortController();
+    // Forward an external abort (e.g. CLI SIGINT) into our internal
+    // controller so the same code path handles both. Use a one-shot
+    // listener; if `opts.abortSignal` is already aborted at entry we
+    // abort immediately on the next tick.
+    if (opts.abortSignal !== undefined) {
+      if (opts.abortSignal.aborted) {
+        controller.abort();
+      } else {
+        opts.abortSignal.addEventListener(
+          "abort",
+          () => {
+            if (!controller.signal.aborted) controller.abort();
+          },
+          { once: true },
+        );
+      }
+    }
     const onStep = (event: StepEvent): void => {
       handleStep(event, state, { verbose, stderr });
+      if (state.abortReason !== undefined && !controller.signal.aborted) {
+        controller.abort();
+      }
     };
 
     let providerSelfError = false;
+    let aborted = false;
     try {
       const loopOpts: RunAgentLoopOptions = {
         system: AGENT_SYSTEM_PROMPT,
@@ -223,17 +269,28 @@ export async function runAgent(
         tools,
         maxSteps: opts.maxTurns ?? DEFAULT_MAX_TURNS,
         onStep,
+        abortSignal: controller.signal,
       };
       if (opts.provider !== undefined) loopOpts.provider = opts.provider;
       if (opts.model !== undefined) loopOpts.model = opts.model;
 
       await runLoop(loopOpts);
     } catch (err) {
-      // §10.5 (generalized): LLM provider self-error → exit 5. Lock release
-      // + INDEX rebuild both still happen below.
-      const message = err instanceof Error ? err.message : String(err);
-      stderr.write(`Error: agent run failed: ${message}\n`);
-      providerSelfError = true;
+      if (opts.abortSignal?.aborted === true) {
+        // External abort (CLI SIGINT). Map to exit 130 at the CLI layer
+        // via `result.aborted`. INDEX rebuild + lock release still run below.
+        aborted = true;
+        state.resultSubtype = "error";
+      } else if (state.abortReason !== undefined) {
+        // Internal cooperative abort (tool-loop circuit breaker). Map to
+        // exit 1 with `error_tool_loop` subtype.
+        state.resultSubtype = "error_tool_loop";
+      } else {
+        // §10.5 (generalized): LLM provider self-error → exit 5.
+        const message = err instanceof Error ? err.message : String(err);
+        stderr.write(`Error: agent run failed: ${message}\n`);
+        providerSelfError = true;
+      }
     }
 
     // ---- 6. Rebuild INDEX for each KB (§8.6) ----------------------------
@@ -254,7 +311,10 @@ export async function runAgent(
     const result: RunAgentResult = { exitCode };
     if (state.numTurns !== undefined) result.numTurns = state.numTurns;
     if (state.totalCostUsd !== undefined) result.totalCostUsd = state.totalCostUsd;
+    if (state.inputTokens !== undefined) result.inputTokens = state.inputTokens;
+    if (state.outputTokens !== undefined) result.outputTokens = state.outputTokens;
     if (state.resultSubtype !== undefined) result.resultSubtype = state.resultSubtype;
+    if (aborted) result.aborted = true;
     void stdout;
     return result;
   } finally {

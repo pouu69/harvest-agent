@@ -71,7 +71,7 @@ LLM 호출은 좁은 출구 두 곳에서만 발생한다 — (1) transcript 에
 - `harvest start` 를 두 번 연속 실행해도 동일 결과 — `processed.json` 이 `(session_id, sha256)` 키로 중복 처리를 차단.
 - 파일 쓰기는 모두 atomic (temp + rename).
 - KB 단위 lock 으로 동시 실행 차단 (충돌 시 exit 4).
-- SIGINT (Ctrl+C) 시 lock 해제 + INDEX 재빌드 후 exit 130 — 부분 결과 보존.
+- SIGINT (Ctrl+C) 시 2단계 graceful shutdown — 1차는 진행 중인 LLM 호출을 cooperative abort 후 lock 해제 + INDEX 재빌드(부분 결과 보존), 2차는 sync cleanup + 강제 종료. 둘 다 exit 130.
 
 ### 단순한 표면
 
@@ -170,7 +170,14 @@ export HARVEST_PROVIDER=google
 export GOOGLE_GENERATIVE_AI_API_KEY=...
 ```
 
-shell `export` 대신 프로젝트 루트의 `.env` / `.env.local` 도 지원 (우선순위: `shell > .env.local > .env` — shell 이 항상 승리).
+shell `export` 대신 프로젝트 루트의 `.env` / `.env.local` 파일도 지원한다. 템플릿(`.env.example`)을 복사해서 시작하면 된다:
+
+```bash
+cp .env.example .env       # 또는 .env.local — 둘 다 .gitignore 처리됨
+$EDITOR .env               # API key 채우기
+```
+
+같은 키에 대한 우선순위: **shell > `.env` > `.env.local`** (먼저 설정된 쪽이 이김; shell 변수는 절대 덮어쓰지 않는다). 따라서 `.env.local` 로 덮어쓰고 싶은 키는 `.env` 에서 빼는 것이 표준 패턴이다. 지원 형식: `KEY=value`, `KEY="quoted"`, `export KEY=value`, `# comment`. 변수 확장(`${OTHER}`) 과 multiline 은 미지원.
 
 ### 매번의 워크플로우
 
@@ -231,19 +238,21 @@ harvest start --dry-run        # 실제 쓰기 없이 의도만 출력
 | 변수 | 용도 | 기본 |
 |---|---|---|
 | `HARVEST_PROVIDER` | `anthropic` / `openai` / `google` | `anthropic` |
-| `HARVEST_MODEL` | 모델 오버라이드 | provider별 default |
+| `HARVEST_MODEL` | Agent 모델 오버라이드 | provider별 default |
+| `HARVEST_EXTRACT_MODEL` | EXTRACT 단계(`extract_items_from_transcript`) 모델 오버라이드 | `HARVEST_MODEL` 따름 |
+| `HARVEST_GATEWAY_URL` | provider SDK 의 default endpoint 를 override (corporate / on-prem gateway 용) | — |
 | `ANTHROPIC_API_KEY` | Anthropic provider 사용 시 | — |
 | `OPENAI_API_KEY` | OpenAI provider 사용 시 | — |
 | `GOOGLE_GENERATIVE_AI_API_KEY` | Google provider 사용 시 | — |
 | `HARVEST_TRANSCRIPT_DIR` | transcript 디렉토리 오버라이드 | `~/.claude/projects` |
-| `HARVEST_DEBUG` | `1` → stderr 에 LLM I/O raw 덤프 | `0` |
+| `HARVEST_DEBUG` | `1` → stderr 에 LLM I/O raw 덤프 + `.env` 로드 요약 | `0` |
 | `HARVEST_TEST_LLM` | `live` / `mock` / `replay` / `record` (테스트용) | `live` |
 
 ---
 
 ## 보안
 
-- **API key 는 환경변수로만 수신** — CLI argv / 파일에 저장 금지.
+- **API key 는 환경변수로만 수신** — CLI argv 에는 절대 노출 금지. `.env` / `.env.local` 파일 사용은 OK 이며 둘 다 기본 `.gitignore` 대상.
 - **transcript 내용은 LLM 으로 전송된다** — transcript 안에 시크릿/토큰이 포함될 수 있음을 인지하고 사용. v1 은 `--redact-secrets` 미지원.
 - **KB 파일은 평문 마크다운** — `.gitignore` 할지 commit 할지 사용자 결정. 팀 commit 시 항목 안에 시크릿이 없는지 검토 권장.
 

@@ -18,7 +18,7 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { cleanupOnSignal, runStart } from "../../src/cli/start.js";
+import { cleanupOnSignal, installSigintHandler, runStart } from "../../src/cli/start.js";
 import type { KBChainEntry } from "../../src/core/types.js";
 
 let root: string;
@@ -119,7 +119,11 @@ describe("runStart — happy path", () => {
     expect(captured).toBeTruthy();
     expect(captured!.kbChainLen).toBeGreaterThanOrEqual(1);
     expect(read(stdout)).toMatch(/Harvest run complete/);
-    expect(read(stdout)).toMatch(/\$/); // cost summary present
+    // SPEC_DEFECTS I-12: cost was always `$0.0000` (AI SDK doesn't
+    // normalize cost). Summary now reports `N turns` (+ tokens when the
+    // run produced any). The `$` was misleading; assert it's gone.
+    expect(read(stdout)).not.toMatch(/\$/);
+    expect(read(stdout)).toMatch(/turns/);
   });
 
   it("forwards --recent / --since / --model / --verbose to runAgent", async () => {
@@ -405,5 +409,75 @@ describe("runStart — --discover with empty result", () => {
     // The cwd-only "Run `harvest init` first" hint should NOT appear when
     // --discover was the user's explicit request.
     expect(err).not.toMatch(/harvest init/);
+  });
+});
+
+describe("runStart — SIGINT graceful shutdown", () => {
+  it("first SIGINT aborts the runner via abortSignal (not process.exit)", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    let receivedSignal: AbortSignal | undefined;
+    let runnerResolved = false;
+
+    const stderrCapture = captured();
+
+    const runStartPromise = runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr: stderrCapture,
+      env: { ANTHROPIC_API_KEY: "sk-test" } as NodeJS.ProcessEnv,
+      runAgentImpl: async (opts) => {
+        receivedSignal = opts.abortSignal;
+        await new Promise<void>((resolve) => {
+          opts.abortSignal?.addEventListener("abort", () => resolve());
+        });
+        runnerResolved = true;
+        return { exitCode: 1, aborted: true, resultSubtype: "error" } as never;
+      },
+    });
+
+    await new Promise((r) => setImmediate(r));
+    expect(receivedSignal).toBeDefined();
+    expect(receivedSignal!.aborted).toBe(false);
+
+    process.emit("SIGINT" as never);
+
+    const exitCode = await runStartPromise;
+    expect(receivedSignal!.aborted).toBe(true);
+    expect(runnerResolved).toBe(true);
+    expect(exitCode).toBe(130);
+    // Verify the completion line went to stderr.
+    expect(read(stderrCapture)).toContain("✓ Cleanup 완료. (exit=130)");
+  });
+
+  it("second SIGINT runs sync cleanupOnSignal and calls processExit(130)", () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const lockPath = path.join(root, ".harvest", ".lock");
+    writeFileSync(
+      lockPath,
+      JSON.stringify({ pid: 1, host: "h", command: "c", start_time: "t" }),
+    );
+
+    const exitCalls: number[] = [];
+    const controller = new AbortController();
+    const handle = installSigintHandler({
+      kbChain: [makeChainEntry(root)],
+      abortController: controller,
+      stderr: captured(),
+      processExit: ((code: number) => { exitCalls.push(code); }) as never,
+    });
+
+    process.emit("SIGINT" as never); // 1st press → abort
+    expect(controller.signal.aborted).toBe(true);
+    expect(exitCalls).toEqual([]);
+    expect(existsSync(lockPath)).toBe(true);
+
+    process.emit("SIGINT" as never); // 2nd press → sync cleanup
+    expect(exitCalls).toEqual([130]);
+    expect(existsSync(lockPath)).toBe(false);
+
+    handle.uninstall();
   });
 });

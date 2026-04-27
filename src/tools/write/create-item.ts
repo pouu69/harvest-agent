@@ -5,13 +5,23 @@
  *
  * Gatekeeper duties (§9.2 / §9.5):
  *   - schema_violation:  Zod input failure
- *   - severity_misuse:   `severity` set on a non-anti-pattern
  *   - category_full:     active count >= 10 (§4.1 cap)
  *   - region_violation:  caller passed *non-empty* paths but every entry was
  *                        outside the KB region (so all dropped). Empty input
  *                        paths are NOT a violation — that's a code-agnostic
  *                        decision/learning, per §9.5 line 1422.
  *   - duplicate_slug:    same `<slug>.md` exists active or in `.archive/`
+ *
+ * # Spec deviation: severity on non-anti-pattern → silent strip (SPEC_DEFECTS I-11)
+ *
+ * §9.5 line 1423 documents `severity_misuse` as a hard reject, but in
+ * practice OpenAI/Google models routinely emit `severity` on every
+ * category (likely a strict-mode JSON Schema artifact where optional
+ * enums get filled in). Rejecting causes the agent to loop on the same
+ * payload. §18.6.3 step 8 ("delete raw.severity") tells the EXTRACT
+ * validator to strip rather than reject; we apply the same lenient
+ * semantics here. The KB output is unchanged because severity isn't
+ * persisted on non-anti-pattern items anyway.
  *
  * On success, returns `{ item_id, file_path, paths_normalized, paths_dropped,
  * created_at }`.
@@ -42,7 +52,6 @@ import { normalizePathsForKb } from "../../core/kb/paths.js";
 import { nowIso as defaultNowIso } from "../../core/time.js";
 import type { CategoryType } from "../../core/types.js";
 import {
-  checkSeverityCategory,
   composeNewItemFile,
   countActiveInCategory,
   type ErrorEnvelope,
@@ -56,28 +65,57 @@ import {
 
 const CATEGORY_CAP = 10 as const;
 
+// SPEC_DEFECTS I-11: split the item schema into a discriminated union so
+// `severity` only appears on the `anti-pattern` variant. Two effects:
+//
+//   1. JSON Schema sent to the LLM has `oneOf` keyed off `category` —
+//      compatible models won't fabricate `severity` on decision /
+//      learning / reusable.
+//   2. Zod's default `strip` mode silently drops unknown keys — so when a
+//      model that ignores the schema (e.g. OpenAI strict-mode tool calls)
+//      still emits `severity` on a non-anti-pattern, it's quietly removed
+//      at parse time instead of triggering a `severity_misuse` reject
+//      that the agent can't recover from.
+//
+// The pre-discriminated-union spec text (§9.5 line 1423) calls
+// `severity_misuse` an error code; we no longer emit it. KB output is
+// unchanged because non-anti-pattern items never persisted severity.
+const baseItemFields = {
+  title_slug: z
+    .string()
+    .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/)
+    .max(32),
+  summary: z.string().min(1).max(60),
+  body_markdown: z
+    .string()
+    .min(50)
+    .max(8000)
+    .refine((b) => /^## [A-Z]/m.test(b), "must contain English ## heading"),
+  tags: z
+    .array(z.string().regex(/^[a-z][a-z0-9_]*$/))
+    .min(1)
+    .max(5),
+  paths: z.array(z.string()),
+  universality: z.enum(["universal", "app-specific", "unverified"]),
+} as const;
+
+const antiPatternItemSchema = z.object({
+  category: z.literal("anti-pattern"),
+  ...baseItemFields,
+  severity: z.enum(["critical", "normal"]).optional(),
+});
+
+const nonAntiPatternItemSchema = z.object({
+  category: z.enum(["decision", "learning", "reusable"]),
+  ...baseItemFields,
+});
+
 export const createItemInputSchema = z.object({
   kb_path: z.string(),
-  item: z.object({
-    category: z.enum(["decision", "learning", "reusable", "anti-pattern"]),
-    title_slug: z
-      .string()
-      .regex(/^[a-z0-9]+(-[a-z0-9]+)*$/)
-      .max(32),
-    summary: z.string().min(1).max(60),
-    body_markdown: z
-      .string()
-      .min(50)
-      .max(8000)
-      .refine((b) => /^## [A-Z]/m.test(b), "must contain English ## heading"),
-    tags: z
-      .array(z.string().regex(/^[a-z][a-z0-9_]*$/))
-      .min(1)
-      .max(5),
-    paths: z.array(z.string()),
-    universality: z.enum(["universal", "app-specific", "unverified"]),
-    severity: z.enum(["critical", "normal"]).optional(),
-  }),
+  item: z.discriminatedUnion("category", [
+    antiPatternItemSchema,
+    nonAntiPatternItemSchema,
+  ]),
 });
 
 export type CreateItemInput = z.infer<typeof createItemInputSchema>;
@@ -119,9 +157,10 @@ export async function createItem(
   const data = parsed.data;
   const item = data.item;
 
-  // 2. severity is anti-pattern only
-  const severityErr = checkSeverityCategory(item.category, item.severity);
-  if (severityErr) return severityErr;
+  // 2. severity is anti-pattern only — already enforced at the schema
+  //    layer via `discriminatedUnion`. Zod's strip mode removes any
+  //    `severity` key fabricated on a non-anti-pattern item before the
+  //    handler runs. See SPEC_DEFECTS I-11 for the rationale.
 
   const category: CategoryType = item.category;
   const kbPath = data.kb_path;
@@ -195,7 +234,11 @@ export async function createItem(
     );
   }
 
-  // 9. Compose + atomicWrite
+  // 9. Compose + atomicWrite. `severity` exists on the anti-pattern
+  //    variant only (discriminated union); the conditional read is the
+  //    type-safe equivalent of "undefined for any other category".
+  const severity =
+    item.category === "anti-pattern" ? item.severity : undefined;
   const { filePath } = await composeNewItemFile({
     kbPath,
     itemId,
@@ -206,7 +249,7 @@ export async function createItem(
     tags: item.tags,
     pathsNormalized,
     universality: item.universality,
-    severity: item.severity,
+    severity,
     createdAt,
   });
 

@@ -104,18 +104,28 @@ describe("createItem (errors)", () => {
     expect((err.details as { active_count: number }).active_count).toBe(10);
   });
 
-  it("returns severity_misuse when severity is set on a learning", async () => {
+  it("silently strips severity when set on a non-anti-pattern (SPEC_DEFECTS I-11)", async () => {
+    // Pre-I-11 this returned `severity_misuse`. The discriminated-union
+    // schema + Zod's default strip mode now drops `severity` at parse
+    // time when category isn't anti-pattern, so `create_item` succeeds
+    // and the resulting file has no severity. KB output is unchanged
+    // because non-anti-pattern items never persisted severity anyway.
     const kb = await makeKb(root, "proj");
-    const err = (await createItem(
+    const out = (await createItem(
       baseInput(kb, {
         category: "learning",
         title_slug: "ts-strict",
         severity: "normal",
       }),
       { nowIso: () => NOW },
-    )) as CreateItemErrorOutput;
+    )) as CreateItemOutput;
 
-    expect(err.error).toBe("severity_misuse");
+    expect("error" in out).toBe(false);
+    expect(out.item_id.startsWith("L-")).toBe(true);
+    const written = await import("node:fs").then((fs) =>
+      fs.promises.readFile(out.file_path, "utf8"),
+    );
+    expect(written).not.toContain("severity:");
   });
 
   it("returns region_violation when ALL non-empty input paths fall outside the KB region", async () => {

@@ -219,6 +219,82 @@ describe("handleStep — assistant_text & tool_result", () => {
     );
     expect(readCaptured(stderr)).toBe("");
   });
+
+  it("sets abortReason='tool_loop' after 6 consecutive same-error tool_results", () => {
+    const state: RunState = {};
+    const stderr = captured();
+    const event = {
+      type: "tool_result" as const,
+      toolName: "create_item",
+      output: {
+        error: "severity_misuse",
+        message: "severity는 anti-pattern일 때만",
+        suggest: "...",
+      },
+    };
+    for (let i = 0; i < 6; i += 1) {
+      send(event, state, { verbose: false, stderr });
+    }
+    expect(state.abortReason).toBe("tool_loop");
+    expect(state.errorStreakCount).toBe(6);
+    expect(readCaptured(stderr)).toContain("[abort]");
+  });
+
+  it("resets the streak when a different error code appears", () => {
+    const state: RunState = {};
+    const stderr = captured();
+    for (let i = 0; i < 3; i += 1) {
+      send(
+        {
+          type: "tool_result",
+          toolName: "create_item",
+          output: { error: "severity_misuse", message: "x" },
+        },
+        state,
+        { verbose: false, stderr },
+      );
+    }
+    send(
+      {
+        type: "tool_result",
+        toolName: "create_item",
+        output: { error: "region_violation", message: "y" },
+      },
+      state,
+      { verbose: false, stderr },
+    );
+    expect(state.errorStreakCount).toBe(1);
+    expect(state.abortReason).toBeUndefined();
+  });
+
+  it("resets the streak on any successful tool_result", () => {
+    const state: RunState = {};
+    const stderr = captured();
+    for (let i = 0; i < 5; i += 1) {
+      send(
+        {
+          type: "tool_result",
+          toolName: "create_item",
+          output: { error: "severity_misuse", message: "x" },
+        },
+        state,
+        { verbose: false, stderr },
+      );
+    }
+    expect(state.errorStreakCount).toBe(5);
+    send(
+      {
+        type: "tool_result",
+        toolName: "report_progress",
+        output: { acknowledged: true },
+      },
+      state,
+      { verbose: false, stderr },
+    );
+    expect(state.errorStreakCount).toBe(0);
+    expect(state.errorStreakKey).toBeUndefined();
+    expect(state.abortReason).toBeUndefined();
+  });
 });
 
 describe("handleStep — finish", () => {

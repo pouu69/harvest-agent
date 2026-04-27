@@ -5,7 +5,10 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { listUnprocessedSessions } from "../../../src/tools/discovery/list-unprocessed-sessions.js";
+import {
+  listUnprocessedSessions,
+  listUnprocessedSessionsInputSchema,
+} from "../../../src/tools/discovery/list-unprocessed-sessions.js";
 import type { ProcessedJson } from "../../../src/core/types.js";
 
 let root: string;
@@ -431,5 +434,60 @@ describe("listUnprocessedSessions", () => {
     );
     if ("error" in out) throw new Error("unexpected error");
     expect(out.sessions.map((s) => s.session_id)).toEqual(["b"]);
+  });
+
+  it("treats since='' as omitted (SPEC_DEFECTS I-12)", async () => {
+    // OpenAI strict-mode tool calls fill optional string fields with `""`;
+    // pre-I-12 this would hit the ISO parser, return `since_invalid_iso`,
+    // and trigger the agent's tool-loop circuit breaker. Schema's
+    // `looseOptionalString` preprocess strips `""` → `undefined`. We
+    // exercise the full schema here (the AI SDK production path runs
+    // parse before `execute`; `listUnprocessedSessions` trusts already-
+    // parsed input).
+    const txDir = path.join(root, "tx");
+    const a = path.join(txDir, "a.jsonl");
+    await writeJsonl(a, { sessionId: "a", cwd: "/work/p" });
+
+    const parsed = listUnprocessedSessionsInputSchema.parse({
+      limit: 20,
+      since: "",
+    });
+    expect(parsed.since).toBeUndefined();
+
+    const out = await listUnprocessedSessions(parsed, {
+      transcriptDir: txDir,
+      findKbChainFn: () => ["/work/p/.harvest"],
+      readProcessedFn: () => ({
+        schema_version: 1,
+        last_run: "",
+        sessions: [],
+      }),
+    });
+    if ("error" in out) throw new Error("unexpected since_invalid_iso reject");
+    expect(out.sessions.map((s) => s.session_id)).toEqual(["a"]);
+  });
+
+  it("strips empty entries from cwd_filter (path.resolve('') would silently match cwd)", async () => {
+    const txDir = path.join(root, "tx");
+    const a = path.join(txDir, "a.jsonl");
+    await writeJsonl(a, { sessionId: "a", cwd: "/work/p" });
+
+    const parsed = listUnprocessedSessionsInputSchema.parse({
+      limit: 20,
+      cwd_filter: ["", "/work/p"],
+    });
+    expect(parsed.cwd_filter).toEqual(["/work/p"]);
+
+    const out = await listUnprocessedSessions(parsed, {
+      transcriptDir: txDir,
+      findKbChainFn: () => ["/work/p/.harvest"],
+      readProcessedFn: () => ({
+        schema_version: 1,
+        last_run: "",
+        sessions: [],
+      }),
+    });
+    if ("error" in out) throw new Error("unexpected error");
+    expect(out.sessions.map((s) => s.session_id)).toEqual(["a"]);
   });
 });

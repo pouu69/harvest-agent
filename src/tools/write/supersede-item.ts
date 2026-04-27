@@ -152,21 +152,19 @@ export async function supersedeItem(
     `${updatedAt}: superseded — ${data.history_note}`,
   );
 
-  // 5. Apply frontmatter_patch.
+  // 5. Apply frontmatter_patch. SPEC_DEFECTS I-11: silently strip
+  //    `severity` from the patch when the existing item is not an
+  //    anti-pattern. The patch schema can't be a discriminated union
+  //    here (no category in the patch), so the strip lives in the
+  //    handler — symmetric with `update_item`.
   const existing = found.item.frontmatter;
-
-  const postSeverity =
-    "severity" in patch && patch.severity !== undefined
-      ? (patch.severity as Severity)
-      : existing.severity;
-  if (postSeverity !== undefined && existing.type !== "anti-pattern") {
-    return {
-      error: "severity_misuse",
-      message: `severity는 category가 anti-pattern일 때만 허용됩니다 (got category=${existing.type})`,
-      suggest: "category가 anti-pattern일 때만 severity 사용",
-      details: { category: existing.type, severity: postSeverity },
-    };
-  }
+  const stripPatchSeverity =
+    "severity" in patch &&
+    patch.severity !== undefined &&
+    existing.type !== "anti-pattern";
+  const effectivePatch = stripPatchSeverity
+    ? { ...patch, severity: undefined }
+    : patch;
 
   const findChain = deps.findKbChainFn ?? findKbChain;
   const allKbs = findChain(path.dirname(data.kb_path));
@@ -205,16 +203,20 @@ export async function supersedeItem(
 
   const newFm: KBItemFrontmatter = {
     ...existing,
-    summary: patch.summary ?? existing.summary,
-    tags: patch.tags ?? existing.tags,
+    summary: effectivePatch.summary ?? existing.summary,
+    tags: effectivePatch.tags ?? existing.tags,
     paths: newPaths,
     universality:
-      (patch.universality as Universality | undefined) ?? existing.universality,
+      (effectivePatch.universality as Universality | undefined) ??
+      existing.universality,
     status: "active", // §9.5 line 1495 — status stays active
     updated: updatedAt,
   };
-  if ("severity" in patch && patch.severity !== undefined) {
-    newFm.severity = patch.severity as Severity;
+  if (
+    "severity" in effectivePatch &&
+    effectivePatch.severity !== undefined
+  ) {
+    newFm.severity = effectivePatch.severity as Severity;
   }
 
   const newItem: KBItem = {

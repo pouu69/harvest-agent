@@ -547,3 +547,58 @@ describe("runAgent — toolBuilder injection", () => {
     expect(factoryCalled).toBe(1);
   });
 });
+
+describe("runAgent — abortSignal forwarding", () => {
+  it("forwards abortSignal to runAgentLoop", async () => {
+    const controller = new AbortController();
+    let received: AbortSignal | undefined;
+
+    const fakeRunLoop = async (opts: { abortSignal?: AbortSignal }) => {
+      received = opts.abortSignal;
+      return { finishReason: "stop", usage: { inputTokens: 0, outputTokens: 0 }, numSteps: 0 };
+    };
+
+    const kbChain = makeKbChain(root);
+    await runAgent({
+      kbChain,
+      runLoop: fakeRunLoop as never,
+      abortSignal: controller.signal,
+      buildIndexFn: () => ({ content: "# Harvest Index\n" }) as never,
+      stdout: captured(),
+      stderr: captured(),
+    });
+
+    // The runner wraps the external signal in an internal controller and
+    // bridges them. So `received` is NOT `controller.signal` directly —
+    // it's the internal controller's signal. Verify forwarding by aborting
+    // the external and checking the received signal goes aborted too.
+    expect(received).toBeDefined();
+    expect(received!.aborted).toBe(false);
+    controller.abort();
+    expect(received!.aborted).toBe(true);
+  });
+
+  it("does not treat AbortError as exit-5 when external signal was aborted", async () => {
+    const controller = new AbortController();
+    controller.abort(); // pre-abort so the fake throws immediately
+
+    const abortErr = new Error("aborted");
+    abortErr.name = "AbortError";
+    const fakeRunLoop = async () => {
+      throw abortErr;
+    };
+
+    const kbChain = makeKbChain(root);
+    const result = await runAgent({
+      kbChain,
+      runLoop: fakeRunLoop as never,
+      abortSignal: controller.signal,
+      buildIndexFn: () => ({ content: "# Harvest Index\n" }) as never,
+      stdout: captured(),
+      stderr: captured(),
+    });
+
+    expect(result.exitCode).not.toBe(5);
+    expect(result.aborted).toBe(true);
+  });
+});

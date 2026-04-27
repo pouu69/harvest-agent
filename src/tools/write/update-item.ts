@@ -138,21 +138,18 @@ export async function updateItem(
   // 3. Patch frontmatter (start from the existing item)
   const existing = found.item.frontmatter;
 
-  // Determine post-patch values for severity guard.
+  // Determine post-patch values for severity. SPEC_DEFECTS I-11: silently
+  // strip `severity` from the patch when the existing item is not an
+  // anti-pattern. Models routinely emit it on every patch (strict-mode
+  // JSON Schema artifact) and rejecting causes the agent to loop.
   const postCategory = existing.type;
-  const postSeverity =
-    "severity" in patch && patch.severity !== undefined
-      ? (patch.severity as Severity)
-      : existing.severity;
-
-  if (postSeverity !== undefined && postCategory !== "anti-pattern") {
-    return {
-      error: "severity_misuse",
-      message: `severity는 category가 anti-pattern일 때만 허용됩니다 (got category=${postCategory})`,
-      suggest: "category가 anti-pattern일 때만 severity 사용",
-      details: { category: postCategory, severity: postSeverity },
-    };
-  }
+  const stripPatchSeverity =
+    "severity" in patch &&
+    patch.severity !== undefined &&
+    postCategory !== "anti-pattern";
+  const effectivePatch = stripPatchSeverity
+    ? { ...patch, severity: undefined }
+    : patch;
 
   // 4. Normalize new paths if present
   const nowIso = deps.nowIso ?? defaultNowIso;
@@ -189,18 +186,24 @@ export async function updateItem(
     }
   }
 
-  // 5. Compose new frontmatter (preserve `created`)
+  // 5. Compose new frontmatter (preserve `created`). Read fields off the
+  //    sanitized `effectivePatch` (severity stripped for non-anti-pattern,
+  //    SPEC_DEFECTS I-11) so the resulting file never carries a misuse.
   const newFm: KBItemFrontmatter = {
     ...existing,
-    summary: patch.summary ?? existing.summary,
-    tags: patch.tags ?? existing.tags,
+    summary: effectivePatch.summary ?? existing.summary,
+    tags: effectivePatch.tags ?? existing.tags,
     paths: newPaths,
     universality:
-      (patch.universality as Universality | undefined) ?? existing.universality,
+      (effectivePatch.universality as Universality | undefined) ??
+      existing.universality,
     updated: updatedAt,
   };
-  if ("severity" in patch && patch.severity !== undefined) {
-    newFm.severity = patch.severity as Severity;
+  if (
+    "severity" in effectivePatch &&
+    effectivePatch.severity !== undefined
+  ) {
+    newFm.severity = effectivePatch.severity as Severity;
   }
   // (never strip an existing severity unless category leaves anti-pattern,
   // which we don't allow; type stays as-is.)

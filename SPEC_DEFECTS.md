@@ -190,6 +190,63 @@ export function nowIso(): string {
 - DESIGN_PROPOSALS.md `P-4` (✅ 수락)
 - PLAN_MULTI_PROVIDER.md (5 phase 머지 플랜 + 위험 / open questions)
 
+### I-11. `severity_misuse` 거부가 OpenAI 계열 모델에서 무한 재시도 루프 유발 → strip-and-proceed 로 변경
+
+**상태**: ✅ **resolved** (2026-04-28)
+
+**원래 결함**: §9.5 line 1423 의 `create_item` 게이트키퍼는 `severity` 가 `category != anti-pattern` 인 항목에 들어오면 `severity_misuse` 에러로 거부. 같은 패턴이 §9.5 의 `update_item` / `supersede_item` 의 frontmatter_patch 에도 적용 (구현은 그렇게 해 왔음). `promote_item.promoted_item` 도 동일한 Zod shape.
+
+**측정된 문제**: gpt-5.2 (OpenAI 호환 사내 게이트웨이) 로 `harvest start` 실행 시, 5 개 후보 중 anti-pattern 1 개는 통과하지만 나머지 (decision / learning / reusable) 는 모델이 `severity: "normal"` 을 채워서 보냄. 게이트키퍼가 계속 `severity_misuse` 거부 → 모델이 같은 인자로 재호출 → 무한 루프 (8 + turn 관측, abort 안전망이 6 회 연속에서 끊을 때까지 진행). 
+
+**원인 두 층**:
+1. **계약**: Zod 스키마가 `severity: z.enum(...).optional()` 로 모든 카테고리에서 허용 — JSON Schema 로 LLM 에 전달되는 도구 정의에 "severity 는 anti-pattern 전용" 제약이 인코딩 안 됨. 그 규칙은 §8.2 시스템 프롬프트 산문과 런타임 게이트키퍼 (`_internal.ts:checkSeverityCategory`) 에만 존재.
+2. **모델 행태**: OpenAI 계열 (특히 strict tool-call 모드) 은 optional enum 필드를 자동 채움. Anthropic 모델은 산문 프롬프트를 더 잘 따르지만, OpenAI 는 스키마 우선 — 산문 무시. conversation history 의 에러 메시지로부터 "다음 호출에 severity 빼라" 적응도 약함.
+
+**§18.6.3 line 3306 의 단서**: EXTRACT validator step 8 은 명시적으로 "delete raw.severity" — strip 이지 reject 아님. 같은 의미를 write tool 들에 적용할 근거.
+
+**위치**:
+- `src/tools/write/create-item.ts` — `createItemInputSchema.item` 이 `z.object({...severity?:...})`
+- `src/tools/write/promote-item.ts` — `promoted_item` 동일 shape
+- `src/tools/write/update-item.ts` — `patch.severity?` (post-patch 검사)
+- `src/tools/write/supersede-item.ts` — `frontmatter_patch.severity?` (post-patch 검사)
+- `src/tools/write/_internal.ts:checkSeverityCategory` — 공유 게이트키퍼 헬퍼
+
+**해소 (2 갈래)**:
+
+**(A) 스키마 레벨**: `create_item` / `promote_item` 의 item shape 을 `z.discriminatedUnion("category", [antiPatternVariant, nonAntiPatternVariant])` 로 분기. anti-pattern variant 만 `severity` 필드 보유. 두 효과:
+- JSON Schema 에 `oneOf` + 디스크리미네이터로 표현됨 — 모델이 스키마를 준수하면 비-anti-pattern 에 severity 안 채움
+- 모델이 스키마 무시하고 severity 박아도 Zod 의 default `strip` 모드가 알 수 없는 키로 silent drop → handler 에 도달 시점엔 이미 정상 input
+
+**(B) 핸들러 레벨**: `update_item` / `supersede_item` 은 patch 에 category 가 없어 discriminated union 불가능. 핸들러에서 `existing.type !== "anti-pattern"` 일 때 `patch.severity` 를 silent strip 한 `effectivePatch` 로 downstream. Reject 안 함.
+
+**부수 변경**:
+- `_internal.ts:checkSeverityCategory` 더는 호출처 없음 (남겨둠 — 향후 신규 도구가 동일 패턴 필요 시 사용 가능, dead-code lint 면제 위한 export 유지).
+- 테스트 `create-item.test.ts` 의 `severity_misuse` 단언 → silent strip + 파일에 severity 미기록 단언으로 변경.
+
+**spec 측 변경 (필요)**: §9.5 line 1423 의 `severity_misuse` 행 제거 또는 "spec deviation per SPEC_DEFECTS I-11" 명기. EXTRACT validator (§18.6.3) 와 의미적으로 정렬.
+
+**KB 출력 영향**: 0 — 비-anti-pattern 항목은 처음부터 severity 를 persist 하지 않았음. 입력 noise 만 흡수.
+
+### I-12. Optional string 필드의 `""` 입력이 "값 있음"으로 오해석 → ISO 검증 실패 등으로 무한 루프
+
+**상태**: ✅ **resolved** (2026-04-28)
+
+**원래 결함**: `z.string().optional()` 로 선언된 LLM-bound 도구 입력 필드들에 OpenAI strict-mode tool calls 가 빈 문자열 `""` 을 자동으로 채워 보냄. 핸들러가 `input.foo !== undefined` 만 검사하면 `""` 도 통과 → downstream 검증 (예: `Date.parse("")` → `NaN`, `path.resolve("")` → `process.cwd()`) 에서 잘못된 결과. 에러 envelope 의 메시지도 콜론 뒤에 빈 값이 찍혀 디버깅 어려움. 모델은 다음 턴에 같은 `""` 을 또 보내 무한 루프 (I-11 의 `severity` 패턴과 동형).
+
+**측정된 사례**:
+1. `list_unprocessed_sessions.since` — `Date.parse("")` 가 `NaN` → `since_invalid_iso` 에러 envelope. 메시지: `since가 ISO8601 형식이 아닙니다: ` (콜론 뒤 비어있음). 6 턴 연속 발생 시 abort circuit-breaker (I-11 후속 안전망) 가 종료.
+2. `list_unprocessed_sessions.cwd_filter[]` — `[""]` 이 들어오면 `path.resolve("")` 가 `process.cwd()` 를 반환하여 의도와 다른 cwd 로 silent 필터링.
+
+**대조 (잘 처리된 예)**: 같은 파일의 `discover_path` 핸들러는 `!== undefined && !== ""` 둘 다 검사 (line 197-199). 일관성이 코드 안에서 깨져 있었음.
+
+**해소**: `looseOptionalString()` / `looseStringArray()` Zod preprocess 헬퍼를 도입해 `""` (또는 whitespace-only) 을 `undefined` 로 정상화. `since`, `discover_path`, `cwd_filter` 모두 적용. AI SDK 의 `inputSchema` 가 핸들러 진입 전에 preprocess 를 실행하므로 production 경로에서 자동 적용. 테스트는 직접 핸들러 호출 시 schema 의 `.parse()` 를 명시적으로 거치게 갱신.
+
+**위치**:
+- `src/tools/discovery/list-unprocessed-sessions.ts` — schema + helpers
+- 다른 도구들 audit 결과: `mark-session-processed.ts:failure_reason` 은 `if (!data.failure_reason)` 의 falsy 검사가 이미 빈 문자열을 잡음 (의도된 게 아니라 우연이지만 동작은 정상). `mark-session-processed.ts:brief_note` 는 dead field (핸들러 미사용) — 영향 없음.
+
+**부수 변경 (`harvest start` 요약 라인)**: `✓ Harvest run complete (12 turns, $0.0000 total)` 의 `$0.0000` 은 AI SDK 가 provider 별 cost 를 normalize 하지 않아 항상 0 으로 표시되어 오해 유발. 토큰 카운트 (`47.5K in / 12.3K out tokens`) 로 교체. `RunAgentResult` 에 `inputTokens` / `outputTokens` 추가, `RunState.inputTokens` / `outputTokens` 추가, `formatTokenUsage` / `formatTokenCount` 헬퍼 도입. Cost 는 per-provider price helper 가 도입되면 다시 추가 가능.
+
 ### I-3. §7.3 INDEX.md 예시 ↔ §18.3 예시의 Status Summary 형태 불일치
 
 **위치**:

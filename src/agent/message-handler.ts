@@ -60,9 +60,38 @@ export interface RunState {
    *  across providers in v6 — currently always 0; reserved for a future
    *  per-provider price helper. */
   totalCostUsd?: number;
+  /** Total input tokens across the run (set on `finish`). AI SDK already
+   *  normalizes this so we can show it in the summary line in lieu of
+   *  the always-zero cost. */
+  inputTokens?: number;
+  /** Total output tokens across the run (set on `finish`). */
+  outputTokens?: number;
   /** Coarse tri-state derived from {@link FinishReason}. */
-  resultSubtype?: "success" | "error_max_turns" | "error";
+  resultSubtype?: "success" | "error_max_turns" | "error" | "error_tool_loop";
+  /**
+   * Last `(toolName, errorCode)` pair surfaced via tool_result error
+   * envelope, formatted as `"name::code"`. Used to detect the agent
+   * hammering the same gatekeeper rejection (e.g. `severity_misuse` ×
+   * 8 turns) so the runner can abort instead of looping until max_steps.
+   */
+  errorStreakKey?: string;
+  /** Consecutive count of {@link errorStreakKey}. */
+  errorStreakCount?: number;
+  /**
+   * When set, the runner should abort the in-flight `generateText` call
+   * via its `AbortController`. Only `"tool_loop"` for now; reserved for
+   * future kill-switches.
+   */
+  abortReason?: "tool_loop";
 }
+
+/**
+ * Same `(toolName, errorCode)` repeating this many times in a row →
+ * abort the run. Threshold is intentionally generous: a single
+ * batched-tool-call step can produce 3–5 identical errors in one go,
+ * so the model should get at least one self-correction window.
+ */
+export const ERROR_STREAK_ABORT_THRESHOLD = 6;
 
 export interface HandleStepOptions {
   /** Toggle verbose console.error logging. */
@@ -183,10 +212,32 @@ export function handleStep(
       // identical to one that's succeeding. Surface those on stderr.
       const name = String(e.toolName ?? "?");
       const errInfo = readErrorEnvelope(e.output);
-      if (errInfo !== null) {
-        const detail = truncate(errInfo.message, 120);
+      if (errInfo === null) {
+        // Successful tool result → break any error streak so a recovery
+        // doesn't get punished by stale failures from earlier in the run.
+        state.errorStreakKey = undefined;
+        state.errorStreakCount = 0;
+        return;
+      }
+      const detail = truncate(errInfo.message, 120);
+      stderr.write(
+        `[${formatHmsLocal(new Date())}]   ✗ ${name}: ${errInfo.code} — ${detail}\n`,
+      );
+      // Streak detection: same `(name, code)` repeating → abort.
+      const streakKey = `${name}::${errInfo.code}`;
+      if (state.errorStreakKey === streakKey) {
+        state.errorStreakCount = (state.errorStreakCount ?? 0) + 1;
+      } else {
+        state.errorStreakKey = streakKey;
+        state.errorStreakCount = 1;
+      }
+      if (
+        state.abortReason === undefined &&
+        state.errorStreakCount >= ERROR_STREAK_ABORT_THRESHOLD
+      ) {
+        state.abortReason = "tool_loop";
         stderr.write(
-          `[${formatHmsLocal(new Date())}]   ✗ ${name}: ${errInfo.code} — ${detail}\n`,
+          `[abort] ${name}이(가) ${state.errorStreakCount}회 연속 동일 에러(${errInfo.code})로 거부됨 — 세션 중단 신호 전송\n`,
         );
       }
       return;
@@ -199,6 +250,12 @@ export function handleStep(
       }
       state.totalCostUsd =
         typeof e.totalCostUsd === "number" ? e.totalCostUsd : 0;
+      if (typeof e.usage?.inputTokens === "number") {
+        state.inputTokens = e.usage.inputTokens;
+      }
+      if (typeof e.usage?.outputTokens === "number") {
+        state.outputTokens = e.usage.outputTokens;
+      }
       state.resultSubtype = mapFinishReason(e.finishReason);
       return;
     }

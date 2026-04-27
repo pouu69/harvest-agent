@@ -190,13 +190,17 @@ export async function runAgentLoop(
     if (opts.abortSignal !== undefined) generateArgs.abortSignal = opts.abortSignal;
     result = await generateText(generateArgs);
   } catch (err) {
-    // Always surface the LLM failure with timing — without this the user
-    // sees a silent multi-minute hang when the gateway is slow / dead.
-    const elapsed = Date.now() - runStart;
-    const detail = err instanceof Error ? err.message : String(err);
-    process.stderr.write(
-      `[llm] generateText FAILED after ${elapsed}ms — ${detail}\n`,
-    );
+    // Suppress the [llm] line for cooperative aborts (e.g. the runner's
+    // tool-loop circuit-breaker calling `controller.abort()`) — those
+    // aren't gateway failures and the runner already logs the reason.
+    const isAbort = isAbortError(err) || opts.abortSignal?.aborted === true;
+    if (!isAbort) {
+      const elapsed = Date.now() - runStart;
+      const detail = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[llm] generateText FAILED after ${elapsed}ms — ${detail}\n`,
+      );
+    }
     throw err;
   }
 
@@ -348,4 +352,20 @@ function coerceTokens(value: number | undefined): number {
 function redactKey(key: string): string {
   if (key.length <= 12) return `(len=${key.length})`;
   return `${key.slice(0, 6)}…${key.slice(-4)} (len=${key.length})`;
+}
+
+/**
+ * Heuristic AbortError detector. AI SDK / fetch / Node may surface aborts
+ * as a `DOMException` with `name === "AbortError"`, an `Error` whose
+ * message contains "abort", or our own re-throws. We don't want a
+ * cooperative abort to show up in the user's stderr as a [llm] FAILED line.
+ */
+function isAbortError(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  const e = err as { name?: unknown; message?: unknown };
+  if (e.name === "AbortError") return true;
+  if (typeof e.message === "string" && /aborted|abort signal/i.test(e.message)) {
+    return true;
+  }
+  return false;
 }

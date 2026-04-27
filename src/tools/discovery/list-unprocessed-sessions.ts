@@ -66,13 +66,43 @@ import type { ProcessedJson } from "../../core/types.js";
 // Schema & types
 // -----------------------------------------------------------------------------
 
+/**
+ * Empty-string → undefined coercion for optional string inputs, per
+ * SPEC_DEFECTS I-12. Models on OpenAI strict-mode tool calls fill
+ * optional string fields with `""` by default; without this preprocess
+ * the handler would mistake `""` for "user supplied a value", then
+ * downstream parsing (e.g. `Date.parse("")` → `NaN`) emits a confusing
+ * error envelope that the agent loops on. Wrap any optional string
+ * field consumed by a model with `looseOptionalString()`.
+ */
+const looseOptionalString = () =>
+  z.preprocess(
+    (v) => (v === "" ? undefined : v),
+    z.string().optional(),
+  );
+
+/**
+ * Same idea for `string[]`: drop empty / whitespace-only elements before
+ * the array is passed to the handler. `path.resolve("")` returns
+ * `process.cwd()` — a quietly wrong filter — so empties must not survive
+ * to the resolve step.
+ */
+const looseStringArray = () =>
+  z.preprocess(
+    (v) =>
+      Array.isArray(v)
+        ? v.filter((s): s is string => typeof s === "string" && s.trim() !== "")
+        : v,
+    z.array(z.string()).optional(),
+  );
+
 export const listUnprocessedSessionsInputSchema = z.object({
   /**
    * §9.3 line 1052: when set, the candidate session's `cwd` MUST sit inside
    * this directory; outside-candidates are dropped (counted in
    * `skipped_out_of_scope`). Resolves SPEC_DEFECTS I-5.
    */
-  discover_path: z.string().optional(),
+  discover_path: looseOptionalString(),
   /**
    * Multi-root version of `discover_path`. When set (non-empty), the
    * candidate's `cwd` must be inside one of the listed dirs. Used by the
@@ -82,8 +112,8 @@ export const listUnprocessedSessionsInputSchema = z.object({
    * `discover_path` and `cwd_filter` may be combined; in that case the cwd
    * must satisfy BOTH (intersection).
    */
-  cwd_filter: z.array(z.string()).optional(),
-  since: z.string().optional(),
+  cwd_filter: looseStringArray(),
+  since: looseOptionalString(),
   limit: z.number().min(1).max(50).default(20),
 });
 

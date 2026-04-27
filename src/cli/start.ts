@@ -161,16 +161,24 @@ export async function runStart(opts: StartOptions): Promise<number> {
 
   // ---- 3. SIGINT handler ----------------------------------------------------
   //
-  // The runner takes its own locks (and releases them in a finally), but if
-  // the user hits Ctrl+C we get exactly one shot to (a) release any
-  // already-acquired lock and (b) rebuild each KB's INDEX so partial
-  // results are visible. Per §10.6 we exit 130 after cleanup.
+  // Two-stage handler:
   //
-  // We only install when called from the real CLI (i.e. not in tests via
-  // runAgentImpl). The agent's own finally still runs first when the SDK
-  // detects the signal in some configurations; the handler here is the
-  // belt-and-suspenders.
-  const sigHandler = installSigintHandler(kbChain, stderr);
+  //   1. **First Ctrl+C** — `abortController.abort()`. The agent's
+  //      `generateText` rejects with AbortError on the next async boundary.
+  //      The runner's `finally` releases locks + rebuilds INDEX. The CLI
+  //      layer (above) prints "✓ Cleanup 완료." and returns 130.
+  //
+  //   2. **Second Ctrl+C** — sync `cleanupOnSignal` + `processExit(130)`.
+  //      Escape hatch when the cooperative path is wedged.
+  //
+  // We only install the handler when called from the real CLI; tests bypass
+  // it by injecting `runAgentImpl`.
+  const abortController = new AbortController();
+  const sigHandler = installSigintHandler({
+    kbChain,
+    stderr,
+    abortController,
+  });
 
   try {
     // ---- 4. Run the agent --------------------------------------------------
@@ -181,6 +189,7 @@ export async function runStart(opts: StartOptions): Promise<number> {
       stdout,
       stderr,
       installSignalHandler: false, // we own the handler at the CLI layer
+      abortSignal: abortController.signal,
     };
     if (opts.discover !== undefined) runOptions.discover = opts.discover;
     if (opts.recent !== undefined) runOptions.recent = opts.recent;
@@ -190,7 +199,16 @@ export async function runStart(opts: StartOptions): Promise<number> {
 
     const result = await runner(runOptions);
 
-    // ---- 5. Summary line ---------------------------------------------------
+    // ---- 5. Aborted runs short-circuit BEFORE the normal summary -----------
+    // User pressed Ctrl+C. The runner's finally already released locks +
+    // rebuilt INDEX. Print a positive completion line (the user explicitly
+    // asked for visible "done" feedback) and return 130.
+    if (result.aborted === true) {
+      stderr.write("✓ Cleanup 완료. (exit=130)\n");
+      return 130;
+    }
+
+    // ---- 6. Summary line ---------------------------------------------------
     const summary = renderSummary(result);
     stdout.write(summary);
 
@@ -299,18 +317,43 @@ function toChainEntry(
 // -----------------------------------------------------------------------------
 
 function renderSummary(result: RunAgentResult): string {
-  const cost = result.totalCostUsd ?? 0;
   const turns = result.numTurns ?? 0;
-  const costStr = `$${cost.toFixed(4)}`;
+  // AI SDK doesn't surface a normalized USD cost across providers, so the
+  // old `$0.0000 total` was always misleading. Show the input/output
+  // token counts the loop *does* report instead. Cost can be reattached
+  // when a per-provider price helper lands.
+  const usage = formatTokenUsage(result);
   if (result.exitCode === 0) {
-    return `\n✓ Harvest run complete (${turns} turns, ${costStr} total)\n`;
+    return `\n✓ Harvest run complete (${turns} turns${usage})\n`;
   }
   if (result.resultSubtype === "error_max_turns") {
-    return `\n⚠ Harvest run hit max_turns (${turns} turns, ${costStr} total). Partial results committed.\n`;
+    return `\n⚠ Harvest run hit max_turns (${turns} turns${usage}). Partial results committed.\n`;
+  }
+  if (result.resultSubtype === "error_tool_loop") {
+    return `\n⚠ Harvest run aborted: 동일 도구 에러가 반복되어 자동 중단됨 (${turns} turns${usage}). Partial results committed.\n`;
   }
   // Lock / SDK errors don't have a result subtype — caller already wrote
   // an Error: line to stderr; just emit a brief stdout marker.
   return `\n✗ Harvest run failed (exit ${result.exitCode}).\n`;
+}
+
+/**
+ * Render input / output tokens as `, 47.5K in / 12.3K out tokens` (or `""`
+ * when neither is known). Compact format keeps the summary on one line
+ * even on long runs. We avoid showing zero-token rows because token-less
+ * runs are typically failures where the metric is meaningless.
+ */
+function formatTokenUsage(result: RunAgentResult): string {
+  const inT = result.inputTokens ?? 0;
+  const outT = result.outputTokens ?? 0;
+  if (inT === 0 && outT === 0) return "";
+  return `, ${formatTokenCount(inT)} in / ${formatTokenCount(outT)} out tokens`;
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
 }
 
 // -----------------------------------------------------------------------------
@@ -384,32 +427,47 @@ export function cleanupOnSignal(opts: CleanupOnSignalOptions): void {
 }
 
 /**
- * Install a SIGINT handler that releases any locks we hold + rebuilds each
- * KB's INDEX, then exits 130. Returns an object with `uninstall()` so the
- * caller can detach the listener on normal completion.
+ * Two-stage SIGINT handler:
  *
- * The actual cleanup logic lives in {@link cleanupOnSignal} so it's directly
- * unit-testable without firing real signals.
+ *   1. **First press** — `abortController.abort()`. The agent's
+ *      `generateText` call rejects with AbortError on the next async
+ *      boundary. The runner's `finally` releases locks + rebuilds
+ *      INDEX; `runStart` returns 130 once it sees the signal aborted.
+ *      Cooperative path; partial results stay committed.
+ *
+ *   2. **Second press** — synchronous {@link cleanupOnSignal} +
+ *      `process.exit(130)`. Escape hatch for when the cooperative
+ *      path is wedged (e.g. a tool stuck in a synchronous loop).
+ *      Locks are unlinked directly without re-acquiring (we own them
+ *      with this pid), and INDEX is rebuilt synchronously so partial
+ *      KB state survives.
+ *
+ * The cleanup logic itself lives in {@link cleanupOnSignal} for direct
+ * unit testing without firing real signals.
  */
-function installSigintHandler(
-  kbChain: KBChainEntry[],
-  stderr: NodeJS.WritableStream,
-): SigintHandle {
-  // Track whether we've already handled — Node delivers SIGINT to *all*
-  // listeners, and a slow cleanup could yield repeated signals. We only
-  // run the cleanup once.
-  let handled = false;
+export function installSigintHandler(args: {
+  kbChain: KBChainEntry[];
+  abortController: AbortController;
+  stderr: NodeJS.WritableStream;
+  processExit?: (code: number) => never;
+}): SigintHandle {
+  const { kbChain, abortController, stderr } = args;
+  const exitFn = args.processExit ?? ((code: number) => process.exit(code));
+  let pressCount = 0;
 
   const handler = () => {
-    if (handled) return;
-    handled = true;
-    stderr.write("\n⚠️  중단 요청. cleanup 중...\n");
-
+    pressCount += 1;
+    if (pressCount === 1) {
+      stderr.write(
+        "\n⚠️  중단 요청. 진행 중인 LLM 호출 abort... (한 번 더 누르면 강제 종료)\n",
+      );
+      if (!abortController.signal.aborted) abortController.abort();
+      return;
+    }
+    // 2nd+ press: hard escape hatch.
+    stderr.write("\n⚠️  강제 종료 — sync cleanup 실행 후 즉시 exit\n");
     cleanupOnSignal({ kbChain, stderr });
-
-    // §10.6: exit 130. Use process.exit because we want to bail RIGHT
-    // NOW; the user is waiting on Ctrl+C feedback.
-    process.exit(130);
+    exitFn(130);
   };
 
   process.on("SIGINT", handler);
