@@ -28,10 +28,20 @@
 
 테스트: 47/47 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
 
-### 발견된 spec 결함 (harvest.md 후속 보정 권장)
+### 발견된 spec 결함 → [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) 참고
 
-1. **§3.2 reference snippet (lines 191–199)** — `d.toISOString().slice(0,19) + offset` 가 UTC 슬라이스에 로컬 offset 을 붙여 round-trip 시 9 시간 (offset 만큼) 어긋남. 현재 `src/core/time.ts` 의 구현이 정답. plan 의 snippet 을 수정하거나 "예시일 뿐, `src/core/time.ts` 참조" 로 대체 권장.
-2. **§18.1 예시의 `tags`/`related` flow style** — yaml@2 stringify 가 짧은 array 도 block style 로 emit. 현재 구현 의도적으로 그대로 둠 (round-trip 안정성 확보). 차후 가독성 위해 short-array → flow style 후처리 옵션 검토 가능.
+Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_DEFECTS.md` 에 정리.
+요약:
+
+- **🔴 B-1** §3.2 `nowIso()` snippet 이 UTC 슬라이스 + 로컬 offset → round-trip 9시간 어긋남
+- **🟡 I-1** 기본 모델 이름 §10/§14 (`claude-sonnet-4-6`) vs §12 (`claude-sonnet-latest`) 불일치
+- **🟡 I-2** §14.3 `zod: ^3` ↔ 실제 SDK peer-dep `zod: ^4`
+- **🟢 S-1~S-3** v1.x 잔재 stale section reference (`§8.5.1`, `§8.6.1`, `§8.7`)
+- **⚪ O-1** Agent SDK `unstable_v2_prompt` API 위험 (Task 17 직전 검증 필수)
+- **⚪ O-2** vitest 빈 테스트 셋 exit 1
+- **🟡 D-1** §18.1 예시의 yaml flow style ↔ yaml@2 default block style
+
+새 task 진행 중 결함 발견 시 `SPEC_DEFECTS.md` 에 추가하고 prefix 별 ID 부여 (`B-`/`I-`/`S-`/`O-`/`D-`).
 
 ---
 
