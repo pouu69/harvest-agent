@@ -33,8 +33,10 @@
 | 11 | Lock | `0d8a449` | `src/core/lock.ts` (`acquireLock`/`releaseLock`/`LockBlockedError`/`LockReleaseMismatchError`/`LockBlockedReason`/`LockHandle`/`LockInfo`/`AcquireLockOptions`). `O_EXCL` (`flag:"wx"`) 로 race-free, ESRCH/EPERM/host-mismatch 분기, 24h mtime stale 임계값, single-retry livelock 가드. 14 tests (`_kill`/`_mtimeMs` 주입 시감). |
 | 12 | INDEX builder | `a9ea8d4` (+ archived/regex polish) | `src/core/kb/index-builder.ts` (`buildIndexMarkdown`, `BuildIndexOptions`, `BuildIndexResult`). frontmatter scan, active 필터, `updated` desc + `id` asc 정렬, 4-col 표 (AP +Severity), Critical cap=5 + paths shortlist, summary 60자 truncate, MM-DD/YYYY-MM-DD 자동, Status Summary (Archived 항상 emit, **I-3** 참조), `_(none)_` 빈 critical, 200줄 soft cap. 17 tests. |
 | 13 | `harvest init` | `bbe5ebc` (+ scan kb_path / idempotent doc / scan return-code fixes) | `src/cli/argv.ts` (`parseArgs`/`ParsedArgs`/`ArgvParseError`), `src/cli/init.ts` (`runInit`/`InitOptions` — 단일 KB / `--scan` 모노레포 자동 감지: pnpm-workspace.yaml, package.json#workspaces, turbo.json, nx.json bail-out, Cargo.toml, go.work; CLAUDE.md marker block 삽입/교체 보존), `src/cli/index.ts` (entry-point dispatcher, `--help`/`--version`). 29 tests (19 argv + 10 init). 비대화형 `--scan` (전체 생성). `--root` 은 `<!-- harvest:root-kb -->` 주석. tsup banner shebang. **Phase 1 완료.** |
+| 14 | 결정론 도구 5개 | `3d43ebd` | `src/core/levenshtein.ts` (`levenshtein` DP) + `src/tools/discovery/` (4 도구) + `src/tools/analysis/find-similar-items.ts`. 모두 `{ error, message, suggest, details? }` envelope 반환 (throw X). 42 새 tests. **병렬 worktree 디스패치 (Task 14, 16 동시).** |
+| 16 | 메타 도구 2개 | `486da25` | `src/tools/meta/report-progress.ts` (timestamped stdout) + `src/tools/meta/mark-session-processed.ts` (sha256 재해시 stateless, status 정합성, `markSessionAcrossKbs` 위임). 18 tests. Status: ✅ spec compliant + ✅ code quality approved. |
 
-테스트: 204/204 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
+테스트: 264/264 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
 
 ### 발견된 spec 결함 → [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) 참고
 
