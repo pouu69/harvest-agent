@@ -1,7 +1,7 @@
 # Harvest 구현 진행 현황
 
 > 본 문서는 `harvest.md` (v2.3) 의 §19 22단계 (실제로는 25개 — Task 22 를 4개로 분해) 를 phase 단위로 추적한다.
-> Task 1–5 는 완료. Task 6 부터 재개할 때 본 문서를 참조해 컨텍스트를 즉시 회복한다.
+> Task 1–6 는 완료. Task 7 부터 재개할 때 본 문서를 참조해 컨텍스트를 즉시 회복한다.
 
 ## 작업 방식
 
@@ -25,8 +25,9 @@
 | 3 | `nowIso()` | `e3c52d0` | `src/core/time.ts` — ISO8601 + 로컬 offset (`+09:00` 같은). **§3.2 reference snippet 의 9시간 offset bug 발견 + 수정** (UTC 시각에 로컬 offset 붙이는 형태였음) |
 | 4 | YAML frontmatter parser/renderer | `e2acd60` + `17071fc` | `src/core/kb/frontmatter.ts` (`parseItem`/`renderItem`/`FrontmatterParseError`), 9 가지 검증 규칙, canonical key order, `superseded-by:` / `superseded-by-cross:` template literal status 모두 round-trip OK |
 | 5 | KB chain + region masking | `e9dced5` | `src/core/kb/chain.ts` (`findKbChain` — `.git`/$HOME/`stopAt` boundary inclusive, `computeKbRegion`, `isInKbRegion` — sep-aware) |
+| 6 | paths 정규화 | `d8cc86d` (+ M2 fix) | `src/core/kb/paths.ts` (`normalizePathsForKb` — region 외 drop, POSIX `/` 강제, dedup on output, kbDir → `"."`). `isInKbRegion` 재사용. 10 tests. |
 
-테스트: 47/47 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
+테스트: 57/57 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
 
 ### 발견된 spec 결함 → [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) 참고
 
@@ -51,7 +52,6 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 
 | # | Task | 핵심 산출물 | 의존성 | 참조 |
 |---|---|---|---|---|
-| 6 | paths 정규화 | `src/core/kb/paths.ts` — `normalizePathsForKb(paths, kbDir, allKbs)` 절대→상대 변환 + region 밖 path drop | Task 5 의 `isInKbRegion` | §5.2, §5.3 |
 | 7 | ID 할당 | `src/core/kb/id.ts` — `allocateId(kbPath, category)` `.archive/` 포함 단조 증가 (재사용 X) | Task 2, Task 5 | §4.4 |
 | 8 | transcript parser | `src/core/transcript/extractor.ts` — JSONL parse, summary jsonl 제외, cwd/touched_paths/tool_calls 추출, `isSidechain` 처리, language 감지 | — | §9.3 read_transcript 반환 필드, §11, §18.7 픽스처 |
 | 9 | transcript 압축 | `src/core/transcript/compress.ts` — target_tokens 충족, user 보존/assistant truncate/tool_result 압축. mode `full`/`summary`/`compressed` 지원 | Task 8 | §9.3 read_transcript |
@@ -95,7 +95,7 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 
 ## Phase 별 재개 권장 순서
 
-1. **Phase 1 잔여 (Task 6–13, 8개)** — 모두 결정론, LLM 의존 0. 같은 세션에서 연속 실행 시 컨텍스트 부담 적음. **다음 세션 시작 시 여기부터.**
+1. **Phase 1 잔여 (Task 7–13, 7개)** — 모두 결정론, LLM 의존 0. 같은 세션에서 연속 실행 시 컨텍스트 부담 적음. **다음 세션 시작 시 여기부터.**
 2. **Phase 2 (Task 14–18, 5개)** — 도구 5개 + 5개 + 2개 + LLM 도구 1개 + MCP wrap. Task 17 만 새 SDK 위험 존재. 17 직전에 SDK export 사전 검증 필요.
 3. **Phase 3 (Task 19–21, 3개)** — Agent SDK `query()` 실호출 시작. 환경변수 `ANTHROPIC_API_KEY` 가 있는 환경에서만 end-to-end 검증 가능. mock 모드로도 빌드 검증 가능.
 4. **Phase 4 (Task 22a–22d, 4개)** — 안정성/품질/배포. 이전 Phase 결과 반영해 픽스처/문서 작성.

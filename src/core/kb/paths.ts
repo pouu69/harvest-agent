@@ -67,7 +67,6 @@ export function normalizePathsForKb(
   const seen = new Set<string>();
 
   for (const raw of paths) {
-    if (typeof raw !== "string") continue;
     if (raw.trim() === "") continue;
 
     // Resolve to absolute. `path.resolve` treats absolute inputs as already
