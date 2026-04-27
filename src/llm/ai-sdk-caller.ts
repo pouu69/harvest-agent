@@ -196,7 +196,10 @@ export class AiSdkLlmCaller implements LlmCaller {
     const provider = this.options.provider ?? parseProvider({ env });
     const apiKey = this.resolveApiKey(provider, env);
     const modelId = this.resolveModelId(args, provider);
-    const model = this.buildModel(provider, apiKey, modelId);
+    // HARVEST_GATEWAY_URL overrides the SDK's default endpoint for any
+    // provider — corporate proxies / on-prem gateways.
+    const baseURL = env.HARVEST_GATEWAY_URL;
+    const model = this.buildModel(provider, apiKey, modelId, baseURL);
 
     let captured: unknown = undefined;
     const tools: ToolSet = {
@@ -210,17 +213,39 @@ export class AiSdkLlmCaller implements LlmCaller {
       } as ToolSet[string],
     };
 
-    const result = await generateText({
-      model,
-      system: args.systemPrompt,
-      prompt: args.userMessage,
-      tools,
-      toolChoice: { type: "tool", toolName: EMIT_ITEMS_TOOL_NAME },
-      // AI SDK has its own retry knob too. We do retries at our layer for
-      // policy parity with the old LiveLlmCaller; turn the inner retries
-      // off so we don't double-back-off.
-      maxRetries: 0,
-    });
+    const debug = Boolean(env.HARVEST_DEBUG);
+    const callStart = Date.now();
+    if (debug) {
+      process.stderr.write(
+        `[debug] EXTRACT call start (provider=${provider} model=${modelId})\n`,
+      );
+    }
+    let result: GenerateTextResult<ToolSet, never>;
+    try {
+      result = await generateText({
+        model,
+        system: args.systemPrompt,
+        prompt: args.userMessage,
+        tools,
+        toolChoice: { type: "tool", toolName: EMIT_ITEMS_TOOL_NAME },
+        // AI SDK has its own retry knob too. We do retries at our layer for
+        // policy parity with the old LiveLlmCaller; turn the inner retries
+        // off so we don't double-back-off.
+        maxRetries: 0,
+      });
+    } catch (err) {
+      const elapsed = Date.now() - callStart;
+      const detail = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[llm] EXTRACT call FAILED after ${elapsed}ms — ${detail}\n`,
+      );
+      throw err;
+    }
+    if (debug) {
+      process.stderr.write(
+        `[debug] EXTRACT call done in ${Date.now() - callStart}ms\n`,
+      );
+    }
 
     // Fallback: if `execute` wasn't invoked (some providers may surface a
     // "tool call with no execution" path) but a tool call landed in the
@@ -245,14 +270,15 @@ export class AiSdkLlmCaller implements LlmCaller {
     provider: Provider,
     apiKey: string,
     modelId: string,
+    baseURL: string | undefined,
   ): LanguageModel {
     switch (provider) {
       case "anthropic":
-        return createAnthropicModel({ apiKey, model: modelId });
+        return createAnthropicModel({ apiKey, model: modelId, baseURL });
       case "openai":
-        return createOpenAIModel({ apiKey, model: modelId });
+        return createOpenAIModel({ apiKey, model: modelId, baseURL });
       case "google":
-        return createGoogleModel({ apiKey, model: modelId });
+        return createGoogleModel({ apiKey, model: modelId, baseURL });
     }
   }
 

@@ -47,6 +47,13 @@ export interface RunState {
   startedAt?: number;
   /** ms since epoch, set on `finish`. */
   endedAt?: number;
+  /**
+   * ms since epoch of the last `tool_call` line we wrote. Used to render a
+   * `+X.Xs` elapsed delta on each subsequent tool_call line so the user
+   * can spot which step is slow. Initialized from `startedAt` on the first
+   * tool_call.
+   */
+  lastToolLineAt?: number;
   /** Number of model turns (steps) the loop reported. */
   numTurns?: number;
   /** Cost in USD reported by the loop. AI SDK doesn't normalize cost
@@ -147,17 +154,41 @@ export function handleStep(
     }
 
     case "tool_call": {
-      if (!verbose) return;
       const name = String(e.toolName ?? "?");
-      const args = truncate(safeStringify(e.input ?? {}), 80);
-      stderr.write(`[tool] ${name}(${args})\n`);
+      if (verbose) {
+        const args = truncate(safeStringify(e.input ?? {}), 80);
+        stderr.write(`[tool] ${name}(${args})\n`);
+        return;
+      }
+      // Default-on lightweight progress line so users see what the agent is
+      // actually doing without `--verbose`. Skip `report_progress` because
+      // its handler already writes a timestamped stdout line — surfacing it
+      // here would double-emit.
+      if (name === "report_progress") return;
+      const now = Date.now();
+      const anchor = state.lastToolLineAt ?? state.startedAt ?? now;
+      const elapsedMs = Math.max(0, now - anchor);
+      state.lastToolLineAt = now;
+      stderr.write(
+        `[${formatHmsLocal(new Date(now))} +${formatElapsed(elapsedMs)}] · ${name}\n`,
+      );
       return;
     }
 
     case "tool_result": {
-      // `report_progress`'s tool already wrote to stdout; surfacing the
-      // envelope here would double-emit. Other tools' results are also
-      // not surfaced — the preceding `tool_call` line is sufficient.
+      // Success envelopes are silent — the preceding `tool_call` line is
+      // enough signal. But error envelopes ({error, message, suggest, ...})
+      // need to be visible: without them, a tool that keeps rejecting
+      // (e.g. `create_item` returning `region_violation` 20 times) looks
+      // identical to one that's succeeding. Surface those on stderr.
+      const name = String(e.toolName ?? "?");
+      const errInfo = readErrorEnvelope(e.output);
+      if (errInfo !== null) {
+        const detail = truncate(errInfo.message, 120);
+        stderr.write(
+          `[${formatHmsLocal(new Date())}]   ✗ ${name}: ${errInfo.code} — ${detail}\n`,
+        );
+      }
       return;
     }
 
@@ -195,6 +226,36 @@ function mapFinishReason(reason: unknown): RunState["resultSubtype"] {
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max - 1) + "…";
+}
+
+/** Local-time `HH:MM:SS`, used for the default tool-call progress prefix. */
+function formatHmsLocal(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * Elapsed-time formatter for the `+X.Xs` segment. Sub-second values render
+ * in `ms`; seconds get one decimal for quick reading.
+ */
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/**
+ * Inspect a tool's `output` for the §9.2 error envelope shape
+ * (`{ error: string, message: string, ... }`). Returns `{code, message}`
+ * when it matches, else `null` (success or unexpected shape — silent).
+ */
+function readErrorEnvelope(
+  output: unknown,
+): { code: string; message: string } | null {
+  if (output === null || typeof output !== "object") return null;
+  const o = output as Record<string, unknown>;
+  if (typeof o.error !== "string" || o.error === "") return null;
+  const message = typeof o.message === "string" ? o.message : "(no message)";
+  return { code: o.error, message };
 }
 
 /**

@@ -63,6 +63,13 @@ export interface GenerateTextLoopArgs {
   prompt: string;
   tools: ToolSet;
   stopWhen: unknown;
+  /**
+   * Cap AI SDK's internal transient-error retry. We pass `1` so a single
+   * stalled gateway response retries at most once instead of stretching a
+   * step into minutes via the SDK default. Per-step recovery is the
+   * agent's job (it sees `error_*` envelopes on tool failures).
+   */
+  maxRetries?: number;
   onStepFinish: (step: unknown) => Promise<void> | void;
 }
 
@@ -129,7 +136,15 @@ export async function runAgentLoop(
   const provider = opts.provider ?? parseProvider({ env });
   const model = parseModel({ provider, explicit: opts.model, env });
   const apiKey = resolveApiKey(provider, opts.apiKey, env);
-  const languageModel = buildModel(provider, apiKey, model);
+  // HARVEST_GATEWAY_URL overrides the SDK's default endpoint for any
+  // provider — corporate proxies / on-prem gateways.
+  const baseURL = env.HARVEST_GATEWAY_URL;
+  if (env.HARVEST_DEBUG) {
+    process.stderr.write(
+      `[debug] resolved provider=${provider} model=${model} baseURL=${baseURL ?? "(default)"} apiKey=${redactKey(apiKey)}\n`,
+    );
+  }
+  const languageModel = buildModel(provider, apiKey, model, baseURL);
 
   const generateText = await resolveGenerateText(opts.generateTextImpl);
   const stopWhen = await resolveStopWhen(opts.maxSteps ?? DEFAULT_MAX_STEPS);
@@ -138,16 +153,51 @@ export async function runAgentLoop(
   // mark a startedAt timestamp before any latency.
   opts.onStep?.({ type: "init" });
 
-  const result = await generateText({
-    model: languageModel,
-    system: opts.system,
-    prompt: opts.prompt,
-    tools: opts.tools,
-    stopWhen,
-    onStepFinish: (step: unknown) => {
-      emitStepEvents(step, opts.onStep);
-    },
-  });
+  const debug = Boolean(env.HARVEST_DEBUG);
+  const runStart = Date.now();
+  let prevStepAt = runStart;
+  if (debug) {
+    process.stderr.write(
+      `[debug] generateText start (provider=${provider} model=${model})\n`,
+    );
+  }
+
+  let result: GenerateTextLoopResult;
+  try {
+    result = await generateText({
+      model: languageModel,
+      system: opts.system,
+      prompt: opts.prompt,
+      tools: opts.tools,
+      stopWhen,
+      maxRetries: 1,
+      onStepFinish: (step: unknown) => {
+        if (debug) {
+          const now = Date.now();
+          process.stderr.write(
+            `[debug] step done in ${now - prevStepAt}ms\n`,
+          );
+          prevStepAt = now;
+        }
+        emitStepEvents(step, opts.onStep);
+      },
+    });
+  } catch (err) {
+    // Always surface the LLM failure with timing — without this the user
+    // sees a silent multi-minute hang when the gateway is slow / dead.
+    const elapsed = Date.now() - runStart;
+    const detail = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `[llm] generateText FAILED after ${elapsed}ms — ${detail}\n`,
+    );
+    throw err;
+  }
+
+  if (debug) {
+    process.stderr.write(
+      `[debug] generateText done in ${Date.now() - runStart}ms total\n`,
+    );
+  }
 
   // Final aggregate event.
   const totalUsage = (result.totalUsage ?? result.usage) as
@@ -232,14 +282,15 @@ function buildModel(
   provider: Provider,
   apiKey: string,
   model: string,
+  baseURL: string | undefined,
 ): LanguageModel {
   switch (provider) {
     case "anthropic":
-      return createAnthropicModel({ apiKey, model });
+      return createAnthropicModel({ apiKey, model, baseURL });
     case "openai":
-      return createOpenAIModel({ apiKey, model });
+      return createOpenAIModel({ apiKey, model, baseURL });
     case "google":
-      return createGoogleModel({ apiKey, model });
+      return createGoogleModel({ apiKey, model, baseURL });
   }
 }
 
@@ -284,4 +335,10 @@ async function resolveStopWhen(maxSteps: number): Promise<unknown> {
 function coerceTokens(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return 0;
   return value;
+}
+
+/** Show only the head + tail of an API key so HARVEST_DEBUG output is safe to paste. */
+function redactKey(key: string): string {
+  if (key.length <= 12) return `(len=${key.length})`;
+  return `${key.slice(0, 6)}…${key.slice(-4)} (len=${key.length})`;
 }

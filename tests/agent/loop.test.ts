@@ -139,6 +139,18 @@ describe("runAgentLoop — happy path", () => {
     expect(c.stopWhen).toBeDefined();
   });
 
+  it("caps AI SDK internal retries at 1 to bound stalled-gateway latency", async () => {
+    const capture: { calls: GenerateTextLoopArgs[] } = { calls: [] };
+    await runAgentLoop({
+      system: "S",
+      prompt: "P",
+      tools: {} as ToolSet,
+      env: baseEnv,
+      generateTextImpl: buildFakeGenerateText(capture, []),
+    });
+    expect(capture.calls[0]!.maxRetries).toBe(1);
+  });
+
   it("returns aggregate result with finishReason + numSteps + usage", async () => {
     const result = await runAgentLoop({
       system: "SYS",

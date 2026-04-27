@@ -150,8 +150,11 @@ export interface ExtractItemsDeps {
   llmCaller?: LlmCaller;
   readTranscript?: ReadTranscriptFn;
   /**
-   * Override `process.env.HARVEST_EXTRACT_MODEL ?? "claude-sonnet-4-6"`. Per
-   * SPEC_DEFECTS I-1, the literal default mirrors §10.1.
+   * Override the EXTRACT model id. Resolution order:
+   * `deps.model` → `HARVEST_EXTRACT_MODEL` env → `HARVEST_MODEL` env → `""`
+   * (lets `AiSdkLlmCaller` fall through to `DEFAULT_MODEL_FOR[provider]`).
+   * Hard-coding an Anthropic id here would silently misroute EXTRACT when
+   * `HARVEST_PROVIDER=openai|google`.
    */
   model?: string;
 }
@@ -215,8 +218,14 @@ export async function extractItemsFromTranscript(
   //    fulfill when the LLM calls `emit_items`. The fake `LlmCaller` short-
   //    circuits this and just returns its own canned items.
   const llmCaller = deps.llmCaller ?? defaultLlmCaller();
+  // Empty string lets `AiSdkLlmCaller` pick `DEFAULT_MODEL_FOR[provider]`,
+  // so EXTRACT follows the active provider instead of hard-coding an
+  // Anthropic id (which 4xxs / hangs on OpenAI / Google gateways).
   const model =
-    deps.model ?? process.env["HARVEST_EXTRACT_MODEL"] ?? "claude-sonnet-4-6";
+    deps.model ??
+    process.env["HARVEST_EXTRACT_MODEL"] ??
+    process.env["HARVEST_MODEL"] ??
+    "";
 
   // 5. Call the LLM. The MCP server topology is the production caller's
   // concern — see `defaultLlmCaller`. Fake callers (tests, Task 22b replay)

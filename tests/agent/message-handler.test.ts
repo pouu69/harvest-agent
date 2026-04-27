@@ -96,11 +96,46 @@ describe("handleStep — tool_call", () => {
     expect(readCaptured(stderr)).toContain("list_unprocessed_sessions");
   });
 
-  it("ignores tool_call entirely in non-verbose mode", () => {
+  it("emits a lightweight HH:MM:SS +elapsed line in non-verbose mode", () => {
+    const state: RunState = { startedAt: Date.now() - 12_345 };
+    const stderr = captured();
+    send(
+      { type: "tool_call", toolName: "read_transcript", input: { big: "x".repeat(500) } },
+      state,
+      { verbose: false, stderr },
+    );
+    const out = readCaptured(stderr);
+    // Format: [HH:MM:SS +12.3s] · read_transcript
+    expect(out).toMatch(
+      /^\[\d{2}:\d{2}:\d{2} \+(?:\d+ms|\d+\.\d+s)\] · read_transcript\n$/,
+    );
+    // input is intentionally NOT echoed in non-verbose mode.
+    expect(out).not.toContain("xxx");
+    // Subsequent tool_call uses lastToolLineAt as the anchor.
+    expect(state.lastToolLineAt).toBeDefined();
+  });
+
+  it("anchors elapsed on the previous tool_call line, not startedAt", () => {
+    const state: RunState = {
+      startedAt: Date.now() - 60_000,
+      lastToolLineAt: Date.now() - 250,
+    };
+    const stderr = captured();
+    send(
+      { type: "tool_call", toolName: "find_similar_items", input: {} },
+      state,
+      { verbose: false, stderr },
+    );
+    const out = readCaptured(stderr);
+    // Should be sub-second since lastToolLineAt was 250ms ago — not 60s.
+    expect(out).toMatch(/\+\d+ms\] · find_similar_items/);
+  });
+
+  it("skips report_progress in non-verbose mode (handler writes stdout itself)", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
-      { type: "tool_call", toolName: "x", input: {} },
+      { type: "tool_call", toolName: "report_progress", input: { message: "hi" } },
       state,
       { verbose: false, stderr },
     );
@@ -132,7 +167,7 @@ describe("handleStep — assistant_text & tool_result", () => {
     expect(readCaptured(stderr)).toBe("");
   });
 
-  it("does not reproduce tool_result body (handler already wrote)", () => {
+  it("does not reproduce tool_result body on success envelope", () => {
     const state: RunState = {};
     const stderr = captured();
     send(
@@ -146,6 +181,43 @@ describe("handleStep — assistant_text & tool_result", () => {
     );
     const out = readCaptured(stderr);
     expect(out).not.toContain("acknowledged");
+  });
+
+  it("surfaces error envelopes from tool_result so silent rejections are visible", () => {
+    const state: RunState = {};
+    const stderr = captured();
+    send(
+      {
+        type: "tool_result",
+        toolName: "create_item",
+        output: {
+          error: "region_violation",
+          message: "paths 정규화 결과 모두 KB 영역 밖이라 drop됐습니다",
+          suggest: "...",
+        },
+      },
+      state,
+      { verbose: false, stderr },
+    );
+    const out = readCaptured(stderr);
+    expect(out).toContain("✗ create_item");
+    expect(out).toContain("region_violation");
+    expect(out).toContain("drop됐습니다");
+  });
+
+  it("does not surface success-shaped tool_result outputs", () => {
+    const state: RunState = {};
+    const stderr = captured();
+    send(
+      {
+        type: "tool_result",
+        toolName: "create_item",
+        output: { item_id: "D-001", file_path: "/x.md" },
+      },
+      state,
+      { verbose: false, stderr },
+    );
+    expect(readCaptured(stderr)).toBe("");
   });
 });
 

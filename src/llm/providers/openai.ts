@@ -14,6 +14,8 @@ import type { LanguageModel } from "ai";
 export interface CreateOpenAIModelOptions {
   apiKey: string;
   model: string;
+  /** Optional baseURL override. Resolved by the caller from `HARVEST_GATEWAY_URL`. */
+  baseURL?: string;
 }
 
 export function createOpenAIModel(
@@ -24,6 +26,10 @@ export function createOpenAIModel(
       "OPENAI_API_KEY is not set. Required when HARVEST_PROVIDER=openai.",
     );
   }
-  const provider = createOpenAI({ apiKey: opts.apiKey });
+  const cfg: { apiKey: string; baseURL?: string } = { apiKey: opts.apiKey };
+  if (opts.baseURL !== undefined && opts.baseURL !== "") {
+    cfg.baseURL = opts.baseURL;
+  }
+  const provider = createOpenAI(cfg);
   return provider(opts.model);
 }
