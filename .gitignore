@@ -13,3 +13,5 @@ coverage/
 
 # Subagent worktree workspaces (created by Agent tool isolation:"worktree" — ephemeral)
 .claude/
+
+.omc/
