@@ -1,0 +1,43 @@
+{
+  "args": {
+    "systemPrompt": "(see EXTRACT_SYSTEM_PROMPT in src/tools/analysis/extract-items.ts — verbatim §18.6.1)",
+    "userMessage": "(synthesized by buildExtractUserPrompt for sess-jwt-refresh-loop-001 — see scenario README for derivation)",
+    "model": "claude-sonnet-4-6",
+    "allowedTools": ["mcp__extract__emit_items"]
+  },
+  "result": {
+    "items": [
+      {
+        "category": "decision",
+        "title_slug": "BadCamelCase",
+        "summary": "title_slug must be kebab — uppercase rejected by step 3 regex",
+        "body_markdown": "## Context\nA decent body with English heading and >50 chars; only the slug is wrong.\n## Decision\nReject all of these candidates so the run hits all_items_rejected.",
+        "tags": ["regression"],
+        "paths": [],
+        "universality": "app-specific"
+      },
+      {
+        "category": "anti-pattern",
+        "title_slug": "wrong-severity",
+        "summary": "severity 값이 enum 밖 → step 8 reject",
+        "body_markdown": "## Symptom\nA body that has English headings and passes other checks; severity is out of enum.\n## Why it happens\nLLM hallucinated a severity level we don't accept.",
+        "tags": ["test"],
+        "paths": [],
+        "universality": "unverified",
+        "severity": "blocker"
+      },
+      {
+        "category": "learning",
+        "title_slug": "missing-english-heading",
+        "summary": "본문에 영문 ## 헤더 없음 → step 9 reject",
+        "body_markdown": "## 무엇\n전부 한국어 헤더만 있어서 step 9 의 영문 ## [A-Z] 정규식이 매치하지 않는 케이스.\n## 작동 원리\n검증자가 이걸 명시적으로 거부하도록 설계되어 있다.",
+        "tags": ["validator"],
+        "paths": [],
+        "universality": "unverified"
+      }
+    ],
+    "input_tokens": 4050,
+    "output_tokens": 1620,
+    "total_cost_usd": 0.031
+  }
+}

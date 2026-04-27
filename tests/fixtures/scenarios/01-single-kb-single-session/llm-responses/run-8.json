@@ -1,0 +1,42 @@
+{
+  "args": {
+    "systemPrompt": "(see EXTRACT_SYSTEM_PROMPT in src/tools/analysis/extract-items.ts — verbatim §18.6.1)",
+    "userMessage": "(synthesized by buildExtractUserPrompt for sess-jwt-refresh-loop-001 — see scenario README for derivation)",
+    "model": "claude-sonnet-4-6",
+    "allowedTools": ["mcp__extract__emit_items"]
+  },
+  "result": {
+    "items": [
+      {
+        "category": "decision",
+        "title_slug": "auth-fix",
+        "summary": "auth 수정",
+        "body_markdown": "## 문맥\n어떤 상황이었는지 적당히 길게 적어두기 위한 한국어 본문. 50자 넘기기 위해 좀 더 늘림.\n## 결정\n뭐를 했는지 한국어로 설명하기.",
+        "tags": ["auth"],
+        "paths": [],
+        "universality": "app-specific"
+      },
+      {
+        "category": "learning",
+        "title_slug": "this-is-an-extremely-long-slug-33",
+        "summary": "very long slug rejection probe",
+        "body_markdown": "## What\nThis body has English headings and is long enough to pass step 9 length check easily.\n## How it works\nIt is rejected by step 3 (title_slug length 33 > 32).",
+        "tags": ["test"],
+        "paths": [],
+        "universality": "unverified"
+      },
+      {
+        "category": "reusable",
+        "title_slug": "no-tags",
+        "summary": "tags 누락 — empty array rejected by step 5",
+        "body_markdown": "## Use case\nThe body is fine, English heading present, length ok. But tags array is empty so step 5 rejects.",
+        "tags": [],
+        "paths": [],
+        "universality": "unverified"
+      }
+    ],
+    "input_tokens": 3900,
+    "output_tokens": 1500,
+    "total_cost_usd": 0.029
+  }
+}
