@@ -214,3 +214,35 @@ describe("runAgentLoop — provider/api-key resolution", () => {
     expect(capture.calls).toHaveLength(1);
   });
 });
+
+describe("runAgentLoop — abortSignal", () => {
+  it("forwards abortSignal to the generateText impl verbatim", async () => {
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+
+    const fakeGenerateText: GenerateTextLoopFn = async (args) => {
+      receivedSignal = (args as unknown as { abortSignal?: AbortSignal })
+        .abortSignal;
+      return {
+        text: "",
+        toolCalls: [],
+        finishReason: "stop",
+        usage: { inputTokens: 0, outputTokens: 0 },
+        steps: [],
+      };
+    };
+
+    await runAgentLoop({
+      provider: "anthropic",
+      apiKey: "sk-test",
+      model: "claude-sonnet-4-6",
+      system: "s",
+      prompt: "p",
+      tools: {},
+      generateTextImpl: fakeGenerateText,
+      abortSignal: controller.signal,
+    });
+
+    expect(receivedSignal).toBe(controller.signal);
+  });
+});

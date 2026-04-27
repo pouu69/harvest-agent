@@ -71,6 +71,9 @@ export interface GenerateTextLoopArgs {
    */
   maxRetries?: number;
   onStepFinish: (step: unknown) => Promise<void> | void;
+  /** Abort the in-flight LLM call cooperatively. AI SDK aborts both the
+   *  HTTP request and the surrounding generation step. */
+  abortSignal?: AbortSignal;
 }
 
 export interface GenerateTextLoopResult {
@@ -111,6 +114,8 @@ export interface RunAgentLoopOptions {
   env?: NodeJS.ProcessEnv;
   /** Inject `generateText` for tests. Default: lazy-import from `ai`. */
   generateTextImpl?: GenerateTextLoopFn;
+  /** Abort the loop cooperatively. Forwarded to `generateText`. */
+  abortSignal?: AbortSignal;
 }
 
 export interface RunAgentLoopResult {
@@ -164,7 +169,7 @@ export async function runAgentLoop(
 
   let result: GenerateTextLoopResult;
   try {
-    result = await generateText({
+    const generateArgs: GenerateTextLoopArgs = {
       model: languageModel,
       system: opts.system,
       prompt: opts.prompt,
@@ -181,7 +186,9 @@ export async function runAgentLoop(
         }
         emitStepEvents(step, opts.onStep);
       },
-    });
+    };
+    if (opts.abortSignal !== undefined) generateArgs.abortSignal = opts.abortSignal;
+    result = await generateText(generateArgs);
   } catch (err) {
     // Always surface the LLM failure with timing — without this the user
     // sees a silent multi-minute hang when the gateway is slow / dead.
