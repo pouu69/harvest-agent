@@ -58,7 +58,7 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 - **🟢 S-5** §11.1 예시의 `trivial-deterministic` (v2.3 enum 단순화 미반영)
 - **🟢 S-6** §8 Playbook 의 유령 도구명 `demote_item` (catalog 는 `promote_item(direction)` 통합)
 - **🟢 S-7** `product.md` ↔ `harvest.md` "MCP" 스코프 충돌 (외부 인터페이스 vs in-process)
-- **⚪ O-1** Agent SDK `unstable_v2_prompt` ✅ **검증 완료** (SDK 0.2.119 export 확인)
+- **⚪ O-1** Agent SDK `unstable_v2_prompt` ⚠️ **재개** — export 는 있으나 `SDKSessionOptions` 가 systemPrompt/mcpServers/tools/maxTurns 미지원. Task 22b 에서 `query()` 기반으로 교체
 - **⚪ O-2** vitest 빈 테스트 셋 exit 1
 - **⚪ O-3** Agent SDK `tool()` 의 inputSchema 는 Zod **raw shape** (z.object 아님)
 - **🟡 D-1** §18.1 예시의 yaml flow style ↔ yaml@2 default block style

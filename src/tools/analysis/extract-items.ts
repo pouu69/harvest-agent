@@ -102,8 +102,11 @@ export interface ExtractItemsOutput {
 export type ExtractItemsErrorCode =
   | "llm_call_failed"
   | "llm_output_unparseable"
-  | "all_items_rejected"
-  | "schema_violation";
+  | "all_items_rejected";
+// Note: `schema_violation` is NOT in this union. Input is presumed
+// pre-validated by the SDK `tool()` wrapper at Task 18 (per O-3); this
+// handler accepts an already-typed `ExtractItemsInput`. If a caller
+// bypasses the wrapper, Zod's safeParse must run upstream.
 
 export interface ExtractItemsErrorOutput {
   error: ExtractItemsErrorCode;
@@ -117,18 +120,20 @@ export interface ExtractItemsErrorOutput {
 // -----------------------------------------------------------------------------
 
 /**
- * Pluggable LLM caller. Production wires `unstable_v2_prompt` against the
- * in-process MCP server; tests inject a fake. The contract is intentionally
- * narrow: caller hands in a system prompt, a user message, and the MCP server
- * config; gets back the *raw* items the LLM emitted (caller validates) plus
- * token + cost telemetry.
+ * Pluggable LLM caller. Production wires the SDK against an in-process MCP
+ * server (built inside the caller); tests inject a fake. The contract is
+ * intentionally narrow: caller hands in a system prompt, user message, model,
+ * and the allowed-tool list; gets back the *raw* items the LLM emitted via
+ * `emit_items` (the caller validates) plus token + cost telemetry. The MCP
+ * server topology is NOT part of this interface — the production caller
+ * builds its own server inline; fixture-replay callers (Task 22b) won't have
+ * one at all.
  */
 export interface LlmCallerArgs {
   systemPrompt: string;
   userMessage: string;
   model: string;
   allowedTools: string[];
-  mcpServers: Record<string, unknown>;
 }
 
 export interface LlmCallerResult {
@@ -224,11 +229,9 @@ export async function extractItemsFromTranscript(
   const model =
     deps.model ?? process.env["HARVEST_EXTRACT_MODEL"] ?? "claude-sonnet-4-6";
 
-  // The mcpServers shape is opaque to the seam — production fills it via the
-  // SDK; the fake doesn't read it.
-  const mcpServers = await buildMcpServersOpaque();
-
-  // 5. Call the LLM.
+  // 5. Call the LLM. The MCP server topology is the production caller's
+  // concern — see `defaultLlmCaller`. Fake callers (tests, Task 22b replay)
+  // never need to wire one up.
   let result: LlmCallerResult;
   try {
     result = await llmCaller.call({
@@ -236,7 +239,6 @@ export async function extractItemsFromTranscript(
       userMessage,
       model,
       allowedTools: ["mcp__extract__emit_items"],
-      mcpServers,
     });
   } catch (err) {
     return {
@@ -504,68 +506,36 @@ function validateOne(raw: unknown): CandidateItem | null {
  */
 function defaultLlmCaller(): LlmCaller {
   return {
-    async call(args: LlmCallerArgs): Promise<LlmCallerResult> {
-      // Lazy import — see file header.
-      const sdk = (await import(
-        "@anthropic-ai/claude-agent-sdk"
-      )) as typeof import("@anthropic-ai/claude-agent-sdk");
-
-      let captured: unknown = undefined;
-
-      const emitItemsShape = {
-        items: z.array(z.unknown()),
-      };
-
-      const emitItemsTool = sdk.tool(
-        "emit_items",
-        "추출된 후보 항목 배열을 전달합니다.",
-        emitItemsShape,
-        async (toolArgs) => {
-          captured = (toolArgs as { items: unknown[] }).items;
-          return { content: [{ type: "text" as const, text: "ok" }] };
-        },
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    async call(_args: LlmCallerArgs): Promise<LlmCallerResult> {
+      // Production LLM path is NOT YET WIRED. The original draft tried
+      // `unstable_v2_prompt(message, SDKSessionOptions)` per plan §18.6 +
+      // SPEC_DEFECTS O-1, but `SDKSessionOptions` (sdk.d.ts:3167) does NOT
+      // declare `systemPrompt`, `mcpServers`, `tools`, or `maxTurns` —
+      // those live on `query()`'s `Options` type (sdk.d.ts:1118+). An
+      // `as unknown as` cast just hid the error; at runtime the SDK would
+      // either silently ignore those fields (no system prompt → LLM can't
+      // call emit_items → 100% llm_output_unparseable) or throw.
+      //
+      // The correct shape is `query({ prompt, options: { systemPrompt,
+      // mcpServers, tools, maxTurns, allowedTools, permissionMode,
+      // settingSources } })` and iterate the AsyncGenerator to capture the
+      // emit_items tool-use call. That refactor lands in Task 22b
+      // (Recording/Replay LlmCaller) — it will share the SDK-call surface
+      // between live and replay modes.
+      //
+      // For now, refuse to silently misbehave: throw a clear error so a
+      // caller invoking the production path (instead of injecting a fake)
+      // gets an immediate "not implemented" signal rather than a baffling
+      // 100% llm_output_unparseable rate.
+      //
+      // SPEC_DEFECTS.md O-1 reopened with the additional finding.
+      throw new Error(
+        "extract_items production LlmCaller is not yet wired (Task 22b). " +
+          "Pass an injected `LlmCaller` via `deps.llmCaller` instead.",
       );
-
-      const server = sdk.createSdkMcpServer({
-        name: "extract",
-        tools: [emitItemsTool],
-      });
-
-      const result = await sdk.unstable_v2_prompt(args.userMessage, {
-        model: args.model,
-        systemPrompt: args.systemPrompt,
-        mcpServers: { extract: server },
-        allowedTools: args.allowedTools,
-        // §18.6 lines 3078–3079: builtin tools off (forces emit_items only),
-        // and a 2-turn cap on the LLM session to bound cost. Empty
-        // `disallowedTools` doesn't block anything; the load-bearing flag is
-        // `tools: []` which scopes the LLM to MCP tools only.
-        tools: [],
-        maxTurns: 2,
-      } as unknown as Parameters<typeof sdk.unstable_v2_prompt>[1]);
-
-      // Result shape: SDKResultMessage. On success, `usage` and
-      // `total_cost_usd` are populated.
-      const usage = (result as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
-      const cost = (result as { total_cost_usd?: number }).total_cost_usd;
-
-      return {
-        items: captured ?? null,
-        input_tokens: usage?.input_tokens ?? 0,
-        output_tokens: usage?.output_tokens ?? 0,
-        total_cost_usd: cost ?? 0,
-      };
     },
   };
-}
-
-/**
- * Production-only stub. The fake `LlmCaller` ignores the `mcpServers` field
- * entirely, so we never need to construct a real MCP server in tests. Kept as
- * a separate function so the lazy-import boundary stays in `defaultLlmCaller`.
- */
-async function buildMcpServersOpaque(): Promise<Record<string, unknown>> {
-  return {};
 }
 
 // -----------------------------------------------------------------------------

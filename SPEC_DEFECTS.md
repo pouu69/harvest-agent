@@ -264,22 +264,59 @@ v1.x 의 §8 은 "5단계 LLM 파이프라인" 으로 `§8.5.1`, `§8.6.1`, `§8
 
 ## ⚪ Outdated Fact
 
-### O-1. Agent SDK `unstable_v2_prompt` API 위험 — ✅ **검증 완료 (2026-04-27)**
+### O-1. Agent SDK `unstable_v2_prompt` API — ⚠️ **재개 (2026-04-27): export 는 있으나 options bag 부적합**
 
 **위치**: §14.1 lines 2280–2306, §18.6 lines 3060–3081
 
-**검증 결과**: `@anthropic-ai/claude-agent-sdk@0.2.119` 가 `unstable_v2_prompt` / `unstable_v2_createSession` / `unstable_v2_resumeSession` 모두 export. Type 정의 (`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts:5361`):
+**재검증**: 단순 export 여부는 ✅ 확인 (`unstable_v2_prompt` / `unstable_v2_createSession` / `unstable_v2_resumeSession` 모두 export). 그러나 **시그니처 검토 결과 (`sdk.d.ts:3167`) `SDKSessionOptions` 가 plan §18.6 이 의도하는 옵션을 받지 않음**:
 
 ```typescript
-export declare function unstable_v2_prompt(
-  _message: string,
-  _options: SDKSessionOptions
-): Promise<SDKResultMessage>;
+// sdk.d.ts:3167 — SDKSessionOptions 의 모든 필드:
+{
+  model: string;
+  pathToClaudeCodeExecutable?, executable?, executableArgs?, env?, cwd?,
+  settingSources?, allowDangerouslySkipPermissions?,
+  allowedTools?, disallowedTools?, canUseTool?, hooks?,
+  permissionMode?, planModeInstructions?,
+}
+// systemPrompt, mcpServers, tools, maxTurns 모두 없음.
 ```
 
-Task 17 은 plan §18.6 의 호출 형태를 그대로 사용 가능. fallback (nested `query()` 패턴) 불필요.
+이 필드들은 `query()` 의 `Options` 타입 (`sdk.d.ts:1118+`) 에 있음. 즉 plan §18.6 이 시사한 호출:
 
-**잔여 위험**: `unstable_` 접두사는 여전히 minor 업데이트마다 깨질 수 있음 — Task 22b (Recording/Replay LLM 모드) 에서 `LlmCaller` 인터페이스로 추상화하여 SDK 변경 충격 흡수 권장.
+```typescript
+await unstable_v2_prompt(userMsg, {
+  systemPrompt, mcpServers, tools: [], maxTurns: 2, ...   // ← 모두 무시
+});
+```
+
+는 SDK 가 unknown field 를 무시 → LLM 은 system prompt 도 못 받고 MCP server 도 등록 안 됨 → 100% `llm_output_unparseable`.
+
+**정확한 호출 패턴 (query() 사용)**:
+
+```typescript
+import { query } from "@anthropic-ai/claude-agent-sdk";
+for await (const msg of query({
+  prompt: userMessage,
+  options: {
+    systemPrompt: EXTRACT_SYSTEM_PROMPT,
+    model,
+    mcpServers: { extract: server },
+    allowedTools: ["mcp__extract__emit_items"],
+    tools: [],
+    maxTurns: 2,
+    permissionMode: "bypassPermissions",
+    allowDangerouslySkipPermissions: true,
+    settingSources: [],
+  },
+})) {
+  // emit_items tool-use 결과 캡처
+}
+```
+
+**구현 회피**: Task 17 `defaultLlmCaller` 은 production 진입 시 명시적 throw (`"production LlmCaller is not yet wired (Task 22b)"`). Task 22b (Recording/Replay LLM 모드) 시점에 `query()` 기반 `LiveLlmCaller` 구현 + 본 결함 spec 보정.
+
+**spec 보정 권장**: §14.1 / §18.6 의 호출 예제를 `query()` 패턴으로 교체.
 
 ### O-3. Agent SDK `tool()` 의 inputSchema 는 Zod **raw shape**, 아닌 ZodObject
 
