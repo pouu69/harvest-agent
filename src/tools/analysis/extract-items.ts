@@ -20,11 +20,13 @@
  *        write Korean summaries gives the most grounded output).
  * 3. Build the §18.6.2 user message (transcript meta block + transcript body
  *    + nudge to call `emit_items`).
- * 4. Build an in-process MCP server "extract" exposing a single `emit_items`
- *    tool. Its handler captures the `items` payload and returns `{}`.
- * 5. Call the LLM via the pluggable {@link LlmCaller}. Production = Agent
- *    SDK's `unstable_v2_prompt`; tests = injected fake. The fake returns the
- *    captured items + token counts directly so we don't need a live model.
+ * 4. The in-process MCP server "extract" (with `emit_items`) is built and
+ *    iterated by the live caller in `src/llm/live-caller.ts`. This file no
+ *    longer owns SDK wiring — see Task 22b.
+ * 5. Call the LLM via the pluggable {@link LlmCaller}. Production resolves
+ *    to a `LiveLlmCaller` (or recording/replay/mock) via `selectLlmCaller`,
+ *    keyed off `HARVEST_TEST_LLM` (§16.4). Tests can inject any caller via
+ *    `deps.llmCaller`.
  * 6. Run §18.6.3's 9-step validator on each emitted candidate. Drop violators
  *    (don't throw); count drops as `rejected_count`.
  * 7. Return `ExtractItemsOutput`. If 100% of candidates dropped, return
@@ -32,12 +34,12 @@
  *
  * # Why a pluggable `LlmCaller`?
  *
- * The SDK's `unstable_v2_prompt` is a real network call. We never want unit
- * tests to talk to the API. The `LlmCaller` interface is the seam: production
- * (`SdkLlmCaller`, registered as the default factory) wires
- * `unstable_v2_prompt` + the in-process MCP server; tests inject a fake that
- * synthesizes the items. Task 22b will broaden this with a fixture-replay
- * variant that loads recorded LLM transcripts.
+ * The live SDK call is a real network call. We never want unit tests to talk
+ * to the API. The `LlmCaller` interface is the seam (now in `src/llm/`):
+ * production = `LiveLlmCaller` (query() + in-process MCP server); CI =
+ * `FixtureLlmCaller` (recorded responses); unit tests = `MockLlmCaller`.
+ * Recording uses `RecordingLlmCaller` to wrap a live call and persist the
+ * response.
  *
  * # Error mapping (§9.4 lines 1297–1301)
  *
@@ -53,13 +55,20 @@
  *
  * # Layering
  *
- * `tools/` may import from `core/`, `node:*`, `zod`, and the SDK. It must
- * never import from `cli/` or `agent/`. We import the SDK lazily inside the
- * production caller factory so test imports don't drag the full dependency.
+ * `tools/` may import from `core/`, `llm/`, `node:*`, and `zod`. It must
+ * never import from `cli/` or `agent/`. The SDK itself is now isolated to
+ * `src/llm/live-caller.ts` (loaded lazily there) so this file no longer
+ * touches `@anthropic-ai/claude-agent-sdk` at all.
  */
 
 import { z } from "zod";
 
+import type {
+  LlmCaller,
+  LlmCallerArgs,
+  LlmCallerResult,
+} from "../../llm/caller.js";
+import { selectLlmCaller } from "../../llm/select.js";
 import type {
   ReadTranscriptInput,
   ReadTranscriptOutput,
@@ -120,33 +129,13 @@ export interface ExtractItemsErrorOutput {
 // -----------------------------------------------------------------------------
 
 /**
- * Pluggable LLM caller. Production wires the SDK against an in-process MCP
- * server (built inside the caller); tests inject a fake. The contract is
- * intentionally narrow: caller hands in a system prompt, user message, model,
- * and the allowed-tool list; gets back the *raw* items the LLM emitted via
- * `emit_items` (the caller validates) plus token + cost telemetry. The MCP
- * server topology is NOT part of this interface — the production caller
- * builds its own server inline; fixture-replay callers (Task 22b) won't have
- * one at all.
+ * The pluggable {@link LlmCaller} interface lives in `src/llm/caller.ts` so
+ * that the four production modes (mock / record / replay / live, §16.4) can
+ * share it with the agent layer (Task 19+) without recursive imports. We
+ * re-export here so existing Task 17 consumers (and tests written against
+ * `extract-items.ts`'s old import path) keep compiling unchanged.
  */
-export interface LlmCallerArgs {
-  systemPrompt: string;
-  userMessage: string;
-  model: string;
-  allowedTools: string[];
-}
-
-export interface LlmCallerResult {
-  /** Raw items array as emitted by the LLM via `emit_items`. We Zod-validate. */
-  items: unknown;
-  input_tokens: number;
-  output_tokens: number;
-  total_cost_usd: number;
-}
-
-export interface LlmCaller {
-  call(args: LlmCallerArgs): Promise<LlmCallerResult>;
-}
+export type { LlmCaller, LlmCallerArgs, LlmCallerResult };
 
 /**
  * Fallback `read_transcript` shim type. We keep the signature minimal — the
@@ -486,56 +475,19 @@ function validateOne(raw: unknown): CandidateItem | null {
 }
 
 // -----------------------------------------------------------------------------
-// SDK-backed default LlmCaller (production)
+// Default LlmCaller (delegates to src/llm/select.ts)
 // -----------------------------------------------------------------------------
 
 /**
- * Builds the production caller. Imports the SDK lazily so unit tests that
- * never invoke this path don't pay the SDK boot cost (and so the SDK's
- * `unstable_v2_*` API surface doesn't need to exist at type-resolution time
- * for non-SDK consumers).
- *
- * The flow:
- *   - Create an `emit_items` SDK tool whose handler stores the args in a
- *     captured slot.
- *   - Wrap into an SDK MCP server `extract`.
- *   - Call `unstable_v2_prompt(userMessage, { systemPrompt, model,
- *     mcpServers, allowedTools, ... })`.
- *   - After the prompt resolves, read the captured items + the result's
- *     `usage` for tokens and `total_cost_usd` for cost.
+ * Returns the env-driven default caller. The actual production path
+ * (`query()` + in-process MCP server) lives in `src/llm/live-caller.ts`;
+ * the four modes (mock / record / replay / live) are dispatched by
+ * `selectLlmCaller` via `HARVEST_TEST_LLM`. See harvest.md §16.4 and
+ * SPEC_DEFECTS.md O-1 for the rationale (`query()`, not the broken
+ * `unstable_v2_prompt` shape).
  */
 function defaultLlmCaller(): LlmCaller {
-  return {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    async call(_args: LlmCallerArgs): Promise<LlmCallerResult> {
-      // Production LLM path is NOT YET WIRED. The original draft tried
-      // `unstable_v2_prompt(message, SDKSessionOptions)` per plan §18.6 +
-      // SPEC_DEFECTS O-1, but `SDKSessionOptions` (sdk.d.ts:3167) does NOT
-      // declare `systemPrompt`, `mcpServers`, `tools`, or `maxTurns` —
-      // those live on `query()`'s `Options` type (sdk.d.ts:1118+). An
-      // `as unknown as` cast just hid the error; at runtime the SDK would
-      // either silently ignore those fields (no system prompt → LLM can't
-      // call emit_items → 100% llm_output_unparseable) or throw.
-      //
-      // The correct shape is `query({ prompt, options: { systemPrompt,
-      // mcpServers, tools, maxTurns, allowedTools, permissionMode,
-      // settingSources } })` and iterate the AsyncGenerator to capture the
-      // emit_items tool-use call. That refactor lands in Task 22b
-      // (Recording/Replay LlmCaller) — it will share the SDK-call surface
-      // between live and replay modes.
-      //
-      // For now, refuse to silently misbehave: throw a clear error so a
-      // caller invoking the production path (instead of injecting a fake)
-      // gets an immediate "not implemented" signal rather than a baffling
-      // 100% llm_output_unparseable rate.
-      //
-      // SPEC_DEFECTS.md O-1 reopened with the additional finding.
-      throw new Error(
-        "extract_items production LlmCaller is not yet wired (Task 22b). " +
-          "Pass an injected `LlmCaller` via `deps.llmCaller` instead.",
-      );
-    },
-  };
+  return selectLlmCaller();
 }
 
 // -----------------------------------------------------------------------------
