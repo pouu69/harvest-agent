@@ -47,6 +47,10 @@
  * passes data in via {@link RunAgentOptions}.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import * as path from "node:path";
+
+import { buildIndexMarkdown } from "../core/kb/index-builder.js";
 import {
   acquireLock,
   LockBlockedError,
@@ -121,6 +125,12 @@ export interface RunAgentOptions {
   installSignalHandler?: boolean;
   /** Override the deterministic clock (mainly for tests). */
   nowIso?: () => string;
+  /**
+   * Test seam for INDEX rebuild on normal termination. Defaults to the real
+   * `buildIndexMarkdown` from `core/kb/index-builder.ts`. Tests pass a fake
+   * to assert call shape / inject failures without touching the filesystem.
+   */
+  buildIndexFn?: typeof buildIndexMarkdown;
 }
 
 export interface RunAgentResult {
@@ -229,6 +239,7 @@ export async function runAgent(
       settingSources: [],
     };
 
+    let sdkSelfError = false;
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const stream = (queryFn as any)({
@@ -245,14 +256,38 @@ export async function runAgent(
         handleMessage(msg, state, { verbose, stderr });
       }
     } catch (err) {
-      // §10.5: Agent SDK self-error → exit 5. Lock release happens in the
-      // outer finally.
+      // §10.5: Agent SDK self-error → exit 5. Lock release + INDEX rebuild
+      // both happen below before we return.
       const message = err instanceof Error ? err.message : String(err);
       stderr.write(`Error: agent run failed: ${message}\n`);
+      sdkSelfError = true;
+    }
+
+    // ---- 6. Rebuild INDEX for each KB (§8.6) ----------------------------
+    //
+    // All non-lock termination paths (success / max_turns / non-fatal error /
+    // SDK self-error) must rebuild INDEX so the next Claude Code session
+    // sees a fresh view of the per-KB items the tools just wrote. We do
+    // this BEFORE the outer finally releases the locks, so we still hold
+    // exclusive write rights on each KB.
+    //
+    // Per-KB errors are logged to stderr and swallowed — a problem with one
+    // KB must not abort the rebuild of the others, and the agent's run
+    // itself already either succeeded or failed independently of INDEX
+    // freshness. (The Ctrl+C path lives in `cli/start.ts:cleanupOnSignal`,
+    // which has the same per-KB-isolated error policy.)
+    rebuildIndexes({
+      kbChain: opts.kbChain,
+      buildIndexFn: opts.buildIndexFn ?? buildIndexMarkdown,
+      nowIso,
+      stderr,
+    });
+
+    if (sdkSelfError) {
       return { exitCode: 5 };
     }
 
-    // ---- 6. Map result to exit code --------------------------------------
+    // ---- 7. Map result to exit code --------------------------------------
     const exitCode: RunAgentResult["exitCode"] =
       state.resultSubtype === "success" ? 0 : 1;
     const result: RunAgentResult = { exitCode };
@@ -311,6 +346,39 @@ export function buildKickoffPrompt(args: {
     lines.push("- dry_run: true (실제 쓰기 없이 보고만)");
   }
   return lines.join("\n");
+}
+
+/**
+ * Rebuild INDEX.md for every KB in the chain, writing the file synchronously
+ * so we don't race the lock release in the outer `finally`. Per-KB errors
+ * are logged to stderr and swallowed — one bad KB must not block the others.
+ *
+ * Mirrors the §8.6 contract on the normal-termination path; the SIGINT path
+ * uses {@link cleanupOnSignal} in `cli/start.ts` (which is sync-by-necessity
+ * because the handler `process.exit(130)`s right after).
+ */
+function rebuildIndexes(args: {
+  kbChain: KBChainEntry[];
+  buildIndexFn: typeof buildIndexMarkdown;
+  nowIso: () => string;
+  stderr: NodeJS.WritableStream;
+}): void {
+  const { kbChain, buildIndexFn, nowIso, stderr } = args;
+  for (const entry of kbChain) {
+    try {
+      const { content } = buildIndexFn({
+        kbPath: entry.kb_path,
+        nowIso: nowIso(),
+      });
+      mkdirSync(entry.kb_path, { recursive: true });
+      writeFileSync(path.join(entry.kb_path, "INDEX.md"), content, "utf8");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      stderr.write(
+        `Warning: INDEX rebuild failed for ${entry.kb_path}: ${msg}\n`,
+      );
+    }
+  }
 }
 
 function releaseAllSafe(

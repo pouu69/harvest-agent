@@ -39,6 +39,29 @@ async function writeJsonl(
   await fsp.writeFile(filePath, line + "\n");
 }
 
+/**
+ * Write a multi-line jsonl with one record per cwd entry. Each entry yields a
+ * `user` line with the given cwd. Used to exercise dominant-cwd behavior.
+ */
+async function writeMultiCwdJsonl(
+  filePath: string,
+  sessionId: string,
+  cwds: string[],
+): Promise<void> {
+  await fsp.mkdir(path.dirname(filePath), { recursive: true });
+  const lines = cwds.map((cwd, i) =>
+    JSON.stringify({
+      type: "user",
+      sessionId,
+      cwd,
+      uuid: `u-${i}`,
+      timestamp: "2026-04-26T10:00:00+09:00",
+      message: { content: [{ type: "text", text: `step ${i}` }] },
+    }),
+  );
+  await fsp.writeFile(filePath, lines.join("\n") + "\n");
+}
+
 describe("listUnprocessedSessions", () => {
   it("returns transcript_dir_unavailable when dir missing", async () => {
     const out = await listUnprocessedSessions(
@@ -184,6 +207,203 @@ describe("listUnprocessedSessions", () => {
     if ("error" in out) throw new Error("unexpected error");
     expect(out.sessions).toHaveLength(1);
     expect(out.sessions[0]!.has_summary_sibling).toBe(true);
+  });
+
+  it("discover_path drops candidates whose cwd is outside the discover root (I-5)", async () => {
+    const txDir = path.join(root, "tx");
+    const insideRoot = path.join(root, "scope-in");
+    const outsideRoot = path.join(root, "scope-out");
+    await fsp.mkdir(insideRoot, { recursive: true });
+    await fsp.mkdir(outsideRoot, { recursive: true });
+    await writeJsonl(path.join(txDir, "in.jsonl"), {
+      sessionId: "in",
+      cwd: insideRoot,
+    });
+    await writeJsonl(path.join(txDir, "out.jsonl"), {
+      sessionId: "out",
+      cwd: outsideRoot,
+    });
+
+    const out = await listUnprocessedSessions(
+      { limit: 20, discover_path: insideRoot },
+      {
+        transcriptDir: txDir,
+        // Pretend BOTH cwds have a KB so the only filter that can drop the
+        // outside one is `discover_path`.
+        findKbChainFn: (cwd) => [path.join(cwd, ".harvest")],
+        readProcessedFn: () => ({
+          schema_version: 1,
+          last_run: "",
+          sessions: [],
+        }),
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    expect(out.sessions.map((s) => s.session_id)).toEqual(["in"]);
+    expect(out.skipped_out_of_scope).toBe(1);
+    expect(out.skipped_no_kb).toBe(0);
+  });
+
+  it("cwd_filter accepts only candidates whose cwd is inside one listed dir (I-4)", async () => {
+    const txDir = path.join(root, "tx");
+    const projA = path.join(root, "projA");
+    const projB = path.join(root, "projB");
+    const projC = path.join(root, "projC");
+    await fsp.mkdir(projA, { recursive: true });
+    await fsp.mkdir(projB, { recursive: true });
+    await fsp.mkdir(projC, { recursive: true });
+    await writeJsonl(path.join(txDir, "a.jsonl"), { sessionId: "a", cwd: projA });
+    await writeJsonl(path.join(txDir, "b.jsonl"), { sessionId: "b", cwd: projB });
+    await writeJsonl(path.join(txDir, "c.jsonl"), { sessionId: "c", cwd: projC });
+
+    const out = await listUnprocessedSessions(
+      { limit: 20, cwd_filter: [projA, projB] },
+      {
+        transcriptDir: txDir,
+        findKbChainFn: (cwd) => [path.join(cwd, ".harvest")],
+        readProcessedFn: () => ({
+          schema_version: 1,
+          last_run: "",
+          sessions: [],
+        }),
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    const ids = out.sessions.map((s) => s.session_id).sort();
+    expect(ids).toEqual(["a", "b"]);
+    expect(out.skipped_out_of_scope).toBe(1);
+  });
+
+  it("discover_path AND cwd_filter intersect (both must pass)", async () => {
+    const txDir = path.join(root, "tx");
+    const monorepo = path.join(root, "mono");
+    const projA = path.join(monorepo, "apps", "a");
+    const projB = path.join(monorepo, "apps", "b");
+    const projOutside = path.join(root, "outside");
+    await fsp.mkdir(projA, { recursive: true });
+    await fsp.mkdir(projB, { recursive: true });
+    await fsp.mkdir(projOutside, { recursive: true });
+    await writeJsonl(path.join(txDir, "a.jsonl"), { sessionId: "a", cwd: projA });
+    await writeJsonl(path.join(txDir, "b.jsonl"), { sessionId: "b", cwd: projB });
+    await writeJsonl(path.join(txDir, "o.jsonl"), {
+      sessionId: "o",
+      cwd: projOutside,
+    });
+
+    const out = await listUnprocessedSessions(
+      // discover_path bounds to monorepo; cwd_filter further narrows to A.
+      { limit: 20, discover_path: monorepo, cwd_filter: [projA] },
+      {
+        transcriptDir: txDir,
+        findKbChainFn: (cwd) => [path.join(cwd, ".harvest")],
+        readProcessedFn: () => ({
+          schema_version: 1,
+          last_run: "",
+          sessions: [],
+        }),
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    expect(out.sessions.map((s) => s.session_id)).toEqual(["a"]);
+    // Both `b` (excluded by cwd_filter) and `o` (excluded by discover_path)
+    // count as out-of-scope.
+    expect(out.skipped_out_of_scope).toBe(2);
+  });
+
+  it("neither filter set → behaves as today (all candidates with KB chain)", async () => {
+    const txDir = path.join(root, "tx");
+    await writeJsonl(path.join(txDir, "a.jsonl"), {
+      sessionId: "a",
+      cwd: "/work/p",
+    });
+    await writeJsonl(path.join(txDir, "b.jsonl"), {
+      sessionId: "b",
+      cwd: "/work/q",
+    });
+
+    const out = await listUnprocessedSessions(
+      { limit: 20 },
+      {
+        transcriptDir: txDir,
+        findKbChainFn: (cwd) => [path.join(cwd, ".harvest")],
+        readProcessedFn: () => ({
+          schema_version: 1,
+          last_run: "",
+          sessions: [],
+        }),
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    expect(out.sessions.map((s) => s.session_id).sort()).toEqual(["a", "b"]);
+    expect(out.skipped_out_of_scope).toBe(0);
+  });
+
+  it("returns the dominant (most-frequent) cwd, not the first encountered (B-2)", async () => {
+    // Session that begins in /tmp/scratch but spends most of its turns inside
+    // /home/user/projectA. The first encounter is /tmp/scratch but the
+    // dominant cwd is /home/user/projectA. Per SPEC_DEFECTS B-2 we MUST
+    // surface the dominant one so the KB-chain pre-filter can find a KB.
+    const txDir = path.join(root, "tx");
+    const sid = "sess-multi";
+    await writeMultiCwdJsonl(path.join(txDir, `${sid}.jsonl`), sid, [
+      "/tmp/scratch",
+      "/home/user/projectA",
+      "/home/user/projectA",
+      "/home/user/projectA",
+    ]);
+
+    let chainCalledWith: string | undefined;
+    const out = await listUnprocessedSessions(
+      { limit: 20 },
+      {
+        transcriptDir: txDir,
+        findKbChainFn: (cwd) => {
+          chainCalledWith = cwd;
+          return cwd === "/home/user/projectA"
+            ? ["/home/user/projectA/.harvest"]
+            : [];
+        },
+        readProcessedFn: () => ({
+          schema_version: 1,
+          last_run: "",
+          sessions: [],
+        }),
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    expect(chainCalledWith).toBe("/home/user/projectA");
+    expect(out.sessions).toHaveLength(1);
+    expect(out.sessions[0]!.cwd).toBe("/home/user/projectA");
+  });
+
+  it("emits first_seen_at as local-offset ISO (never UTC Z)", async () => {
+    const txDir = path.join(root, "tx");
+    const sid = "sess-tz";
+    await writeJsonl(path.join(txDir, `${sid}.jsonl`), {
+      sessionId: sid,
+      cwd: "/work/p",
+    });
+
+    const out = await listUnprocessedSessions(
+      { limit: 20 },
+      {
+        transcriptDir: txDir,
+        findKbChainFn: () => ["/work/p/.harvest"],
+        readProcessedFn: () => ({
+          schema_version: 1,
+          last_run: "",
+          sessions: [],
+        }),
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    expect(out.sessions).toHaveLength(1);
+    const fsa = out.sessions[0]!.first_seen_at;
+    // §3.2 / §9.2: ISO8601 with explicit local offset, no `Z`.
+    expect(fsa).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/,
+    );
+    expect(fsa.endsWith("Z")).toBe(false);
   });
 
   it("filters by `since`", async () => {

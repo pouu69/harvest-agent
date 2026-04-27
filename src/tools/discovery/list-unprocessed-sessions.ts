@@ -59,6 +59,7 @@ import {
   readProcessed,
   ProcessedSchemaError,
 } from "../../core/processed.js";
+import { isoFromMs } from "../../core/time.js";
 import type { ProcessedJson } from "../../core/types.js";
 
 // -----------------------------------------------------------------------------
@@ -66,7 +67,22 @@ import type { ProcessedJson } from "../../core/types.js";
 // -----------------------------------------------------------------------------
 
 export const listUnprocessedSessionsInputSchema = z.object({
+  /**
+   * §9.3 line 1052: when set, the candidate session's `cwd` MUST sit inside
+   * this directory; outside-candidates are dropped (counted in
+   * `skipped_out_of_scope`). Resolves SPEC_DEFECTS I-5.
+   */
   discover_path: z.string().optional(),
+  /**
+   * Multi-root version of `discover_path`. When set (non-empty), the
+   * candidate's `cwd` must be inside one of the listed dirs. Used by the
+   * runner to scope a `harvest start` invocation to exactly the KBs in the
+   * resolved chain so tools-write scope == lock scope (SPEC_DEFECTS I-4).
+   *
+   * `discover_path` and `cwd_filter` may be combined; in that case the cwd
+   * must satisfy BOTH (intersection).
+   */
+  cwd_filter: z.array(z.string()).optional(),
   since: z.string().optional(),
   limit: z.number().min(1).max(50).default(20),
 });
@@ -79,6 +95,13 @@ export interface UnprocessedSession {
   session_id: string;
   transcript_path: string;
   sha256: string;
+  /**
+   * Dominant cwd of the session: the most-frequent `cwd` across user/assistant
+   * lines, with first-encounter as the tiebreaker. Matches the §9.3 line 1120
+   * definition used by `read_transcript` (was previously "first encountered",
+   * which lost multi-cwd sessions whose first cwd is outside any KB —
+   * SPEC_DEFECTS B-2).
+   */
   cwd: string;
   first_seen_at: string;
   file_size_bytes: number;
@@ -91,6 +114,12 @@ export interface ListUnprocessedSessionsOutput {
   total_count: number;
   skipped_already_processed: number;
   skipped_no_kb: number;
+  /**
+   * Count of candidates dropped because their `cwd` was outside the requested
+   * `discover_path` / `cwd_filter` scope. Always 0 when neither input was
+   * provided. (SPEC_DEFECTS I-4 / I-5.)
+   */
+  skipped_out_of_scope: number;
 }
 
 export interface ListUnprocessedSessionsErrorOutput {
@@ -162,10 +191,23 @@ export async function listUnprocessedSessions(
   const findKb = deps.findKbChainFn ?? findKbChain;
   const readProc = deps.readProcessedFn ?? readProcessed;
 
+  // Resolve scope inputs once. `discover_path` / `cwd_filter` are both
+  // optional; when neither is set we accept any cwd (current behavior).
+  // When both are set we intersect them (cwd must satisfy BOTH).
+  const discoverRoot =
+    input.discover_path !== undefined && input.discover_path !== ""
+      ? path.resolve(input.discover_path)
+      : undefined;
+  const cwdFilterRoots =
+    input.cwd_filter !== undefined && input.cwd_filter.length > 0
+      ? input.cwd_filter.map((p) => path.resolve(p))
+      : undefined;
+
   const candidates = await collectCandidates(transcriptDir);
 
   let skippedNoKb = 0;
   let skippedAlreadyProcessed = 0;
+  let skippedOutOfScope = 0;
   // Per-KB processed.json cache so multi-KB chains don't re-read the same file.
   const processedCache = new Map<string, ProcessedJson>();
 
@@ -173,6 +215,14 @@ export async function listUnprocessedSessions(
 
   for (const cand of candidates) {
     if (cand === null) continue;
+
+    // §9.3 line 1052 + SPEC_DEFECTS I-4/I-5: scope filter takes precedence
+    // over the KB-chain pre-filter — out-of-scope candidates are not the
+    // domain of this run regardless of whether they have a KB.
+    if (!isCwdInScope(cand.cwd, discoverRoot, cwdFilterRoots)) {
+      skippedOutOfScope += 1;
+      continue;
+    }
 
     const chain = findKb(cand.cwd);
     if (chain.length === 0) {
@@ -225,7 +275,52 @@ export async function listUnprocessedSessions(
     total_count: survivors.length,
     skipped_already_processed: skippedAlreadyProcessed,
     skipped_no_kb: skippedNoKb,
+    skipped_out_of_scope: skippedOutOfScope,
   };
+}
+
+/**
+ * Returns true iff `cwd` is permitted by the configured scope.
+ *
+ *   - When neither `discoverRoot` nor `cwdFilterRoots` is set, any cwd passes.
+ *   - When `discoverRoot` is set, `cwd` must equal-or-descend from it.
+ *   - When `cwdFilterRoots` is set (non-empty), `cwd` must equal-or-descend
+ *     from at least one entry.
+ *   - When both are set, both checks must pass (intersection).
+ *
+ * "Inside" is decided via `path.relative(root, cwd)`: relative path neither
+ * starts with `..` nor is absolute (covers both POSIX and Windows). The cwd
+ * itself counts as inside (relative === "").
+ */
+function isCwdInScope(
+  cwd: string,
+  discoverRoot: string | undefined,
+  cwdFilterRoots: string[] | undefined,
+): boolean {
+  const cwdAbs = path.resolve(cwd);
+  if (discoverRoot !== undefined) {
+    if (!isInsideOrEqual(discoverRoot, cwdAbs)) return false;
+  }
+  if (cwdFilterRoots !== undefined) {
+    let any = false;
+    for (const root of cwdFilterRoots) {
+      if (isInsideOrEqual(root, cwdAbs)) {
+        any = true;
+        break;
+      }
+    }
+    if (!any) return false;
+  }
+  return true;
+}
+
+function isInsideOrEqual(root: string, target: string): boolean {
+  if (root === target) return true;
+  const rel = path.relative(root, target);
+  if (rel === "") return true;
+  if (rel.startsWith("..")) return false;
+  if (path.isAbsolute(rel)) return false;
+  return true;
 }
 
 // -----------------------------------------------------------------------------
@@ -287,9 +382,11 @@ async function collectCandidates(
 }
 
 /**
- * Reads enough of `jsonlPath` to extract `cwd` from the first user/assistant
- * line, the session id, sha256 of the file, and stat metadata. Returns null
- * if the file cannot be parsed enough to produce a candidate.
+ * Reads `jsonlPath` to extract the dominant `cwd` (most-frequent across
+ * user/assistant lines, with first-encounter tiebreak), the session id,
+ * sha256 of the file, and stat metadata. Returns null if the file cannot be
+ * parsed enough to produce a candidate (no parseable user/assistant line, no
+ * sessionId, no cwd at all).
  */
 async function readCandidate(
   jsonlPath: string,
@@ -309,9 +406,14 @@ async function readCandidate(
   const sha256 = createHash("sha256").update(buf).digest("hex");
   const text = buf.toString("utf-8");
 
-  let cwd: string | undefined;
   let sessionId: string | undefined;
-  // Iterate lines — stop as soon as we have both cwd and sessionId.
+  // Build a histogram of cwds across the entire transcript so we can pick the
+  // dominant one (most-frequent, first-encounter tiebreak). This matches
+  // `parseTranscript` / `read_transcript`'s definition (§9.3 line 1120) and
+  // resolves SPEC_DEFECTS B-2 (multi-cwd sessions previously lost when the
+  // first cwd was outside any KB).
+  const cwdCounts = new Map<string, number>();
+  const cwdsSeen: string[] = [];
   const lines = text.split("\n");
   for (const raw of lines) {
     const trimmed = raw.trim();
@@ -332,19 +434,30 @@ async function readCandidate(
     ) {
       sessionId = (parsed as Record<string, unknown>)["sessionId"] as string;
     }
-    if (
-      cwd === undefined &&
-      typeof (parsed as Record<string, unknown>)["cwd"] === "string"
-    ) {
-      cwd = (parsed as Record<string, unknown>)["cwd"] as string;
+    const candCwd = (parsed as Record<string, unknown>)["cwd"];
+    if (typeof candCwd === "string" && candCwd !== "") {
+      const prev = cwdCounts.get(candCwd) ?? 0;
+      if (prev === 0) cwdsSeen.push(candCwd);
+      cwdCounts.set(candCwd, prev + 1);
     }
-    if (cwd !== undefined && sessionId !== undefined) break;
   }
 
-  if (sessionId === undefined || cwd === undefined) return null;
+  if (sessionId === undefined || cwdsSeen.length === 0) return null;
 
-  // ISO8601 with system offset for first_seen_at — derived from mtime.
-  const firstSeenAt = new Date(stat.mtimeMs).toISOString();
+  // Pick dominant cwd: highest count; first-encounter wins on tie.
+  let cwd = cwdsSeen[0]!;
+  let dominantCount = cwdCounts.get(cwd) ?? 0;
+  for (const c of cwdsSeen) {
+    const n = cwdCounts.get(c) ?? 0;
+    if (n > dominantCount) {
+      cwd = c;
+      dominantCount = n;
+    }
+  }
+
+  // ISO8601 with system offset for first_seen_at — derived from mtime, per
+  // §3.2 / §9.2 (no UTC `Z`).
+  const firstSeenAt = isoFromMs(stat.mtimeMs);
 
   return {
     session_id: sessionId,

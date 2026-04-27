@@ -148,6 +148,135 @@ describe("readTranscript", () => {
     expect(out.content).toContain("Read");
   });
 
+  it("summary mode prefers sessions-index.json when present (§9.3 line 1112)", async () => {
+    const sid = "sess-prefers-index";
+    const projDir = path.join(root, "proj");
+    const tx = path.join(projDir, `${sid}.jsonl`);
+    await writeJsonl(tx, [
+      lineFor({
+        type: "user",
+        sessionId: sid,
+        cwd: "/w",
+        message: { content: [{ type: "text", text: "raw user prompt" }] },
+      }),
+      lineFor({
+        type: "assistant",
+        sessionId: sid,
+        cwd: "/w",
+        message: {
+          content: [
+            { type: "tool_use", id: "t1", name: "Read", input: { file_path: "/x" } },
+          ],
+        },
+      }),
+    ]);
+    // Claude-Code-generated index sibling.
+    await fsp.writeFile(
+      path.join(projDir, "sessions-index.json"),
+      JSON.stringify({
+        sessions: { [sid]: { summary: "claude-generated index summary" } },
+      }),
+    );
+
+    const out = await readTranscript(
+      { session_id: sid, mode: "summary", target_tokens: 8000 },
+      { transcriptDir: root },
+    );
+    if ("error" in out) throw new Error(`unexpected error: ${out.error}`);
+    expect(out.content).toContain("claude-generated index summary");
+    // The compressor's "first user message" digest must NOT have been used.
+    expect(out.content).not.toContain("raw user prompt");
+    // Tool-name list still surfaced (informational appendix).
+    expect(out.content).toContain("Read");
+  });
+
+  it("summary mode falls back to <session>-summary.jsonl when sessions-index missing", async () => {
+    const sid = "sess-fallback-summary-jsonl";
+    const projDir = path.join(root, "proj");
+    const tx = path.join(projDir, `${sid}.jsonl`);
+    await writeJsonl(tx, [
+      lineFor({
+        type: "user",
+        sessionId: sid,
+        cwd: "/w",
+        message: { content: [{ type: "text", text: "raw user prompt" }] },
+      }),
+    ]);
+    // No sessions-index.json. Sibling -summary.jsonl with one summary line.
+    await fsp.writeFile(
+      path.join(projDir, `${sid}-summary.jsonl`),
+      JSON.stringify({ type: "summary", summary: "from -summary.jsonl" }) +
+        "\n",
+    );
+
+    const out = await readTranscript(
+      { session_id: sid, mode: "summary", target_tokens: 8000 },
+      { transcriptDir: root },
+    );
+    if ("error" in out) throw new Error(`unexpected error: ${out.error}`);
+    expect(out.content).toContain("from -summary.jsonl");
+    expect(out.content).not.toContain("raw user prompt");
+  });
+
+  it("summary mode falls back to compressor when no pre-existing summary present", async () => {
+    const sid = "sess-no-extras";
+    const projDir = path.join(root, "proj");
+    const tx = path.join(projDir, `${sid}.jsonl`);
+    await writeJsonl(tx, [
+      lineFor({
+        type: "user",
+        sessionId: sid,
+        cwd: "/w",
+        message: { content: [{ type: "text", text: "find the bug" }] },
+      }),
+      lineFor({
+        type: "assistant",
+        sessionId: sid,
+        cwd: "/w",
+        message: {
+          content: [
+            { type: "tool_use", id: "t1", name: "Read", input: { file_path: "/x" } },
+          ],
+        },
+      }),
+    ]);
+
+    const out = await readTranscript(
+      { session_id: sid, mode: "summary", target_tokens: 8000 },
+      { transcriptDir: root },
+    );
+    if ("error" in out) throw new Error(`unexpected error: ${out.error}`);
+    // Original behavior: first user message + tool-use names.
+    expect(out.content).toContain("find the bug");
+    expect(out.content).toContain("Read");
+  });
+
+  it("summary mode silently falls through when sessions-index.json is malformed", async () => {
+    const sid = "sess-malformed-index";
+    const projDir = path.join(root, "proj");
+    const tx = path.join(projDir, `${sid}.jsonl`);
+    await writeJsonl(tx, [
+      lineFor({
+        type: "user",
+        sessionId: sid,
+        cwd: "/w",
+        message: { content: [{ type: "text", text: "find the bug" }] },
+      }),
+    ]);
+    await fsp.writeFile(
+      path.join(projDir, "sessions-index.json"),
+      "this is not json {",
+    );
+
+    const out = await readTranscript(
+      { session_id: sid, mode: "summary", target_tokens: 8000 },
+      { transcriptDir: root },
+    );
+    if ("error" in out) throw new Error(`unexpected error: ${out.error}`);
+    // Falls all the way through to the compressor.
+    expect(out.content).toContain("find the bug");
+  });
+
   it("recurses into nested project-hash subdirs to resolve session_id", async () => {
     const sid = "sess-nested";
     const tx = path.join(root, "-projects-foo", `${sid}.jsonl`);

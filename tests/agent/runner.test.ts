@@ -384,6 +384,151 @@ describe("runAgent — exit code mapping (§12.2)", () => {
   });
 });
 
+describe("runAgent — INDEX rebuild on normal termination (§8.6 / P1.1)", () => {
+  it("rebuilds INDEX for each KB on success", async () => {
+    const child = path.join(root, "apps", "web");
+    mkdirSync(child, { recursive: true });
+    const kbChain = makeKbChain(child, root);
+    const fq = fakeQuery(happyPathMessages());
+
+    const calls: string[] = [];
+    const buildIndexFn = (opts: { kbPath: string; nowIso: string }) => {
+      calls.push(opts.kbPath);
+      return {
+        content: `INDEX for ${opts.kbPath}\n`,
+        skipped: [],
+        line_count: 1,
+      };
+    };
+
+    const result = await runAgent({
+      kbChain,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      query: fq as any,
+      llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
+      buildIndexFn,
+      stdout: captured(),
+      stderr: captured(),
+    });
+
+    expect(result.exitCode).toBe(0);
+    // One call per KB in chain.
+    expect(calls).toHaveLength(kbChain.length);
+    expect(calls).toEqual(kbChain.map((e) => e.kb_path));
+    // INDEX.md actually written for each.
+    for (const entry of kbChain) {
+      const written = await fsp.readFile(
+        path.join(entry.kb_path, "INDEX.md"),
+        "utf8",
+      );
+      expect(written).toBe(`INDEX for ${entry.kb_path}\n`);
+    }
+  });
+
+  it("rebuilds INDEX even on max_turns (non-fatal)", async () => {
+    const kbChain = makeKbChain(root);
+    const fq = fakeQuery([
+      { type: "system", subtype: "init" },
+      {
+        type: "result",
+        subtype: "error_max_turns",
+        num_turns: 300,
+        total_cost_usd: 0.5,
+      },
+    ]);
+
+    let calls = 0;
+    const buildIndexFn = () => {
+      calls += 1;
+      return { content: "x\n", skipped: [], line_count: 1 };
+    };
+
+    const result = await runAgent({
+      kbChain,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      query: fq as any,
+      llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
+      buildIndexFn,
+      stdout: captured(),
+      stderr: captured(),
+    });
+    expect(result.exitCode).toBe(1);
+    expect(calls).toBe(1);
+  });
+
+  it("INDEX rebuild error is logged but does not change exit code", async () => {
+    const child = path.join(root, "apps", "web");
+    mkdirSync(child, { recursive: true });
+    const kbChain = makeKbChain(child, root);
+    const fq = fakeQuery(happyPathMessages());
+
+    const stderr = captured();
+    const calls: string[] = [];
+    const buildIndexFn = (opts: { kbPath: string; nowIso: string }) => {
+      calls.push(opts.kbPath);
+      // Throw for the first KB only; the second must still rebuild.
+      if (opts.kbPath === kbChain[0]!.kb_path) {
+        throw new Error("synthetic INDEX failure");
+      }
+      return { content: "ok\n", skipped: [], line_count: 1 };
+    };
+
+    const result = await runAgent({
+      kbChain,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      query: fq as any,
+      llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
+      buildIndexFn,
+      stdout: captured(),
+      stderr,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(calls).toHaveLength(2);
+    // Second KB still rebuilt.
+    const written = await fsp.readFile(
+      path.join(kbChain[1]!.kb_path, "INDEX.md"),
+      "utf8",
+    );
+    expect(written).toBe("ok\n");
+    // Error logged.
+    expect((stderr as unknown as CapturedStream).text()).toContain(
+      "synthetic INDEX failure",
+    );
+  });
+
+  it("does not rebuild INDEX when locks couldn't be acquired (exit 4)", async () => {
+    const kbChain = makeKbChain(root);
+    const { acquireLock } = await import("../../src/core/lock.js");
+    acquireLock(kbChain[0]!.kb_path, {
+      command: "harvest test pre-lock",
+      nowIso: new Date().toISOString(),
+      pid: process.pid,
+    });
+
+    let calls = 0;
+    const buildIndexFn = () => {
+      calls += 1;
+      return { content: "x\n", skipped: [], line_count: 1 };
+    };
+
+    const fq = (() => {
+      throw new Error("never called");
+    }) as unknown;
+    const result = await runAgent({
+      kbChain,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      query: fq as any,
+      llmCaller: new MockLlmCaller(DEFAULT_MOCK_RESULT),
+      buildIndexFn,
+      stdout: captured(),
+      stderr: captured(),
+    });
+    expect(result.exitCode).toBe(4);
+    expect(calls).toBe(0);
+  });
+});
+
 describe("runAgent — server factory injection", () => {
   it("accepts a serverFactory override (used by integration tests)", async () => {
     const kbChain = makeKbChain(root);
