@@ -15,6 +15,8 @@ module.exports = {
   rules: {
     // Enforce CLI -> Agent -> Tools -> Core layered import direction (per harvest.md §14.2).
     // A layer may only import from layers strictly to the right of itself.
+    // `claudemd/` sits at the same level as `cli/` (it edits user-facing files
+    // and is imported only by `cli/`); it can import from `core/` only.
     "import/no-restricted-paths": [
       "error",
       {
@@ -23,11 +25,18 @@ module.exports = {
           { target: "./src/core", from: "./src/cli" },
           { target: "./src/core", from: "./src/agent" },
           { target: "./src/core", from: "./src/tools" },
-          // tools may not import from cli or agent
+          { target: "./src/core", from: "./src/claudemd" },
+          // tools may not import from cli, agent, or claudemd
           { target: "./src/tools", from: "./src/cli" },
           { target: "./src/tools", from: "./src/agent" },
-          // agent may not import from cli
+          { target: "./src/tools", from: "./src/claudemd" },
+          // agent may not import from cli or claudemd
           { target: "./src/agent", from: "./src/cli" },
+          { target: "./src/agent", from: "./src/claudemd" },
+          // claudemd may not import from cli (cli imports claudemd, not vice versa)
+          { target: "./src/claudemd", from: "./src/cli" },
+          { target: "./src/claudemd", from: "./src/agent" },
+          { target: "./src/claudemd", from: "./src/tools" },
         ],
       },
     ],

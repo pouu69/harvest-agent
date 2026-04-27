@@ -16,15 +16,13 @@
  *     we just print the detected paths and create them all. A future
  *     `--include <glob>` flag can filter; until then the contract is
  *     "scan = init everywhere we found a workspace".
- *   - **Marker block language**: §13.1's example uses English; §12.1's uses
- *     a sparser block without the resolution-rule banner. We render the
- *     §13.3 English form (it's the version that includes the resolution
- *     rule banner Claude actually needs). Existing user prose outside the
- *     markers is preserved verbatim.
- *   - **`--root`**: spec says only "init 시 root임을 표시." For v1 this
- *     surfaces as a `<!-- harvest:root-kb -->` comment inside the marker
- *     block. No structural difference yet — Task 21 will use it when the
- *     chain-import enhancement lands.
+ *   - **CLAUDE.md marker block**: rendered + spliced by
+ *     `src/claudemd/integration.ts` (Task 21). This module just walks the KB
+ *     chain after mkdir and hands `(cwd, kbPath, kbChain, isRoot)` over.
+ *     Existing user prose outside the markers is preserved verbatim.
+ *   - **`--root`**: spec says only "init 시 root임을 표시." Surfaces as a
+ *     `<!-- harvest:root-kb -->` comment inside the marker block, emitted
+ *     by the integration module.
  *   - **Idempotency on re-run**: a `.harvest/` that already exists is a
  *     no-op — we print "Already initialized" and return 0 *without* touching
  *     INDEX.md or CLAUDE.md. To repair a damaged CLAUDE.md marker block,
@@ -45,7 +43,9 @@ import * as path from "node:path";
 import picomatch from "picomatch";
 import { parse as yamlParse } from "yaml";
 
+import { updateClaudeMd } from "../claudemd/integration.js";
 import { atomicWrite } from "../core/atomic-write.js";
+import { findKbChain } from "../core/kb/chain.js";
 import { buildIndexMarkdown } from "../core/kb/index-builder.js";
 
 // -----------------------------------------------------------------------------
@@ -63,7 +63,9 @@ export interface InitOptions {
   nowIso: string;
   /** Injection seam for testable output. Use `process.stdout` in prod. */
   stdout: NodeJS.WritableStream;
-  /** Injection seam (forwarded to `findKbChain` callers in Task 21). */
+  /** Injection seam: `$HOME` override forwarded to `findKbChain` so tests
+   *  using a tmpdir outside the user's home don't accidentally break out of
+   *  the chain at `os.homedir()`. */
   homedir?: string;
 }
 
@@ -128,110 +130,40 @@ async function runInitSingle(
   });
   await atomicWrite(path.join(kbPath, "INDEX.md"), content);
 
-  // Insert / update the CLAUDE.md marker block.
-  await updateClaudeMd(targetCwd, opts.root);
+  // Insert / update the CLAUDE.md marker block. Chain detection runs
+  // *after* the `.harvest/` mkdir above so the just-created KB is itself in
+  // the chain (closest-first). `findKbChain` may still return an empty array
+  // in pathological cases (FS race, symlink loop) — fall back to `[kbPath]`
+  // so we always emit at least the self-import.
+  const detected = findKbChain(targetCwd, { homedir: opts.homedir });
+  const kbChain = detected.length > 0 ? detected : [kbPath];
+  const claudeResult = await updateClaudeMd({
+    cwd: targetCwd,
+    kbPath,
+    kbChain,
+    isRoot: opts.root,
+  });
+
+  // Outcome-aware status line for CLAUDE.md. The "Next:" hint comes after
+  // the directory creation summary regardless of which path the marker block
+  // took (created / appended / replaced / unchanged).
+  const claudeStatus =
+    claudeResult.outcome === "created"
+      ? "✓ CLAUDE.md created with @.harvest/INDEX.md import"
+      : claudeResult.outcome === "unchanged"
+        ? "✓ CLAUDE.md already up-to-date"
+        : "✓ CLAUDE.md updated";
 
   opts.stdout.write(
     `✓ Created .harvest/ in ${targetCwd}\n` +
       `  - INDEX.md (empty)\n` +
       `  - decisions/, learnings/, reusable/, anti-patterns/\n` +
       `  - .archive/, .state/\n` +
-      `✓ CLAUDE.md updated with @.harvest/INDEX.md import\n` +
+      `${claudeStatus}\n` +
       `\n` +
       `Next: run \`harvest start\` after some Claude Code sessions.\n`,
   );
   return 0;
-}
-
-// -----------------------------------------------------------------------------
-// CLAUDE.md marker block
-// -----------------------------------------------------------------------------
-
-const MARKER_OPEN = "<!-- harvest:knowledge-base -->";
-const MARKER_CLOSE = "<!-- /harvest:knowledge-base -->";
-
-/**
- * Build the marker block body. Per §13.1 / §13.3 the block carries:
- *   - the `## Knowledge Base` heading,
- *   - a Resolution-rule blockquote (more-specific KB wins),
- *   - the `@.harvest/INDEX.md` self-import,
- *   - a placeholder comment for the chain-import enhancement (Task 21),
- *   - optionally a `<!-- harvest:root-kb -->` comment when `--root` is set.
- *
- * The block is sandwiched by the open / close marker comments — only the
- * region between them is touched on subsequent runs.
- */
-function renderMarkerBlock(rootFlag: boolean): string {
-  const lines: string[] = [];
-  lines.push(MARKER_OPEN);
-  lines.push("## Knowledge Base");
-  lines.push("");
-  lines.push(
-    "> Resolution rule: more specific (closer) KB wins. If guidance from",
-  );
-  lines.push(
-    "> this app's KB contradicts root KB, follow this app's KB.",
-  );
-  lines.push("");
-  lines.push("@.harvest/INDEX.md");
-  lines.push(
-    "<!-- chain imports for parent KBs go here in Task 21 (multi-KB enhancement) -->",
-  );
-  if (rootFlag) {
-    lines.push("<!-- harvest:root-kb -->");
-  }
-  lines.push("");
-  lines.push(MARKER_CLOSE);
-  return lines.join("\n");
-}
-
-/**
- * Insert / replace the harvest marker block in `<cwd>/CLAUDE.md`.
- *
- * Cases:
- *   - File missing → create it with `# <basename(cwd)>\n\n<block>\n`.
- *   - File present and contains both markers → swap the in-between region
- *     (preserves everything outside the markers byte-for-byte).
- *   - File present without markers → append `\n\n<block>\n` at the end.
- *
- * Spec §12.1 says "이미 CLAUDE.md가 있으면 마커 사이만 갱신. 마커 밖은
- * 손대지 않음." We honor that strictly.
- */
-async function updateClaudeMd(cwd: string, rootFlag: boolean): Promise<void> {
-  const filePath = path.join(cwd, "CLAUDE.md");
-  const block = renderMarkerBlock(rootFlag);
-
-  if (!existsSync(filePath)) {
-    const projectName = path.basename(cwd) || "project";
-    const initial = `# ${projectName}\n\n${block}\n`;
-    await atomicWrite(filePath, initial);
-    return;
-  }
-
-  const existing = readFileSync(filePath, "utf8");
-  const openIdx = existing.indexOf(MARKER_OPEN);
-  const closeIdx = existing.indexOf(MARKER_CLOSE);
-
-  if (openIdx >= 0 && closeIdx > openIdx) {
-    // Replace the entire marker region inclusive of the markers themselves.
-    const before = existing.slice(0, openIdx);
-    const after = existing.slice(closeIdx + MARKER_CLOSE.length);
-    const next = before + block + after;
-    if (next !== existing) {
-      await atomicWrite(filePath, next);
-    }
-    return;
-  }
-
-  // No markers found — append. Use `\n\n` separator unless the file already
-  // ends in a blank line.
-  const sep = existing.endsWith("\n\n")
-    ? ""
-    : existing.endsWith("\n")
-      ? "\n"
-      : "\n\n";
-  const next = existing + sep + block + "\n";
-  await atomicWrite(filePath, next);
 }
 
 // -----------------------------------------------------------------------------
