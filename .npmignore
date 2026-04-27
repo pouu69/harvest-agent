@@ -1,0 +1,28 @@
+# Source — only dist/ ships
+src/
+tests/
+node_modules/
+
+# Tooling configs
+.eslintrc.cjs
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+
+# Spec / planning artifacts
+harvest.md
+PROGRESS.md
+SPEC_DEFECTS.md
+DESIGN_PROPOSALS.md
+architecture.md
+product.md
+
+# IDE / OS
+.idea/
+.vscode/
+.claude/
+.DS_Store
+
+# Build artifacts beyond dist/
+*.log
+*.tsbuildinfo

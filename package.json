@@ -1,15 +1,47 @@
 {
   "name": "harvest-cli",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Distill Claude Code session transcripts into a per-project knowledge base.",
   "type": "module",
   "bin": {
     "harvest": "./dist/harvest.js"
   },
+  "files": [
+    "dist/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/<owner>/<repo>.git"
+  },
+  "homepage": "https://github.com/<owner>/<repo>#readme",
+  "bugs": {
+    "url": "https://github.com/<owner>/<repo>/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "agent",
+    "knowledge-base",
+    "kb",
+    "session",
+    "harvest",
+    "ai",
+    "cli",
+    "anthropic"
+  ],
+  "license": "MIT",
   "scripts": {
     "build": "tsup",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "prepublishOnly": "npm run typecheck && npm test && npm run lint && npm run build"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.119",

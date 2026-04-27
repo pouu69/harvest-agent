@@ -36,9 +36,9 @@ async function main(): Promise<number> {
   }
 
   if (parsed.flags.version || parsed.command === "version") {
-    // Hardcoded for now — Task 22d will wire this to package.json at build
-    // time. Keeping a stable string here is fine pre-publish.
-    process.stdout.write("harvest 0.0.0\n");
+    // Hardcoded to mirror package.json's version. Keep these in lock-step
+    // when bumping (a build-time inject is overkill for v1).
+    process.stdout.write("harvest 0.1.0\n");
     return 0;
   }
 
