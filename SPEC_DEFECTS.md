@@ -144,6 +144,25 @@ export function nowIso(): string {
 
 **처리 방침**: Phase 2 에서는 미구현 유지. Task 22a (시나리오 픽스처) 에서 50% 실패 케이스를 측정하여 retry 의 실효성 검증 후 결정.
 
+### I-9. `cross_kb_id_format_error` 가 promote-item 의 I/O catch-all 로 오용됨
+
+**위치**: §9.5 line 1642 의 정의 — "rel-path 계산 실패 (KB 경로 부정확)"
+
+**구현 현황** (`src/tools/write/promote-item.ts`, commit `f019590`):
+- 라인 ~292: 정상 — rel-path 계산 실패 시.
+- 라인 ~460: **misuse** — demote 의 archive 파일 write 실패 (atomicWrite 던짐).
+- 라인 ~470: **misuse** — demote 의 active 파일 unlink 실패.
+
+**문제**: Agent (Task 20) 가 envelope 의 `error: "cross_kb_id_format_error"` + `suggest: "kb_path들이 같은 모노레포 안에 있는지 확인"` 를 보면 KB 설정 문제로 진단하나, 실제 원인은 무관한 fs 오류. 잘못된 회복 방향 유도.
+
+**보정 권장 (post-v1)**: 신규 에러 코드 추가:
+- `origin_update_failed` — origin 의 status 갱신 atomicWrite 실패
+- `origin_unlink_failed` — demote 시 active 파일 unlink 실패
+
+§9.5 의 promote_item / archive_item 에러 표에 추가.
+
+**임시 회피**: Task 20 (`harvest start`) 가 이 코드를 받았을 때 `details.cause` 필드를 보고 진짜 원인을 추론하도록 핸들러 작성.
+
 ### I-3. §7.3 INDEX.md 예시 ↔ §18.3 예시의 Status Summary 형태 불일치
 
 **위치**:
