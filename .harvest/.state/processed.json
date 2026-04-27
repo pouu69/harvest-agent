@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "last_run": "2026-04-28T00:31:24+09:00",
+  "sessions": [
+    {
+      "session_id": "af0a13b8-3be1-4695-903d-810d5e69ca01",
+      "transcript_sha256": "90c979554485ac3b06e8b3f40f5f8f591972b4d111c0ac54a0a287a35a58cf4c",
+      "first_seen_at": "2026-04-28T00:26:33+09:00",
+      "last_seen_at": "2026-04-28T00:26:33+09:00",
+      "status": "processed",
+      "skipped_reason": "other",
+      "extracted_count": 3,
+      "kb_actions": [
+        {
+          "kb": "/Users/al02628744/study/harvest-agent/.harvest",
+          "actions": [
+            "create decision D-001 two-stage-sigint-shutdown",
+            "create anti-pattern A-003 uncommitted-cross-task-diff",
+            "update anti-pattern A-002 sigint-forced-exit-drops-work"
+          ]
+        }
+      ],
+      "failure_reason": ""
+    },
+    {
+      "session_id": "8753d43a-5bd3-4804-87d0-35daf5ee442c",
+      "transcript_sha256": "79eaa3cd4f48a84de3586b98d02bdfd4980dae1978b8032dda307a4f78f5af3e",
+      "first_seen_at": "2026-04-28T00:30:12+09:00",
+      "last_seen_at": "2026-04-28T00:30:12+09:00",
+      "status": "processed",
+      "skipped_reason": "other",
+      "extracted_count": 6,
+      "kb_actions": [
+        {
+          "kb": "/Users/al02628744/study/harvest-agent/.harvest",
+          "actions": [
+            "create D-002 extract-uses-selected-provider",
+            "create D-002 always-show-basic-progress",
+            "create D-002 agent-max-retries-1",
+            "create L-001 severity-misuse-causes-loop",
+            "create R-001 zod-discriminated-union-cat",
+            "create A-004 optional-empty-string-invalid"
+          ]
+        }
+      ],
+      "failure_reason": ""
+    },
+    {
+      "session_id": "af0a13b8-3be1-4695-903d-810d5e69ca01",
+      "transcript_sha256": "03317d0f7ff95581af1d279ee820d5377ba4213687d61f7b7779a0d6752d604d",
+      "first_seen_at": "2026-04-28T00:31:24+09:00",
+      "last_seen_at": "2026-04-28T00:31:24+09:00",
+      "status": "processed",
+      "skipped_reason": "other",
+      "extracted_count": 4,
+      "kb_actions": [
+        {
+          "kb": "/Users/al02628744/study/harvest-agent/.harvest",
+          "actions": [
+            "merge into A-002 (sigint forced exit drops work)",
+            "merge into D-001 (two stage sigint shutdown)",
+            "merge into A-003 (uncommitted cross task diff)"
+          ]
+        }
+      ],
+      "failure_reason": ""
+    }
+  ]
+}
