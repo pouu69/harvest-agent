@@ -75,6 +75,69 @@ describe("parseArgs", () => {
     expect(r.flags.json).toBe(true);
   });
 
+  // --recent N (DESIGN_PROPOSALS P-1) — positive integer with strict
+  // validation. Zero / negatives / non-numeric must throw with exit 2.
+  describe("--recent N (P-1)", () => {
+    it("parses start --recent <N> as a number", () => {
+      const r = run("start", "--recent", "5");
+      expect(r.command).toBe("start");
+      expect(r.flags.recent).toBe(5);
+    });
+
+    it("parses --recent with multi-digit N", () => {
+      const r = run("start", "--recent", "42");
+      expect(r.flags.recent).toBe(42);
+    });
+
+    it("defaults to undefined when --recent is not given", () => {
+      const r = run("start");
+      expect(r.flags.recent).toBeUndefined();
+    });
+
+    it("throws when --recent has no value", () => {
+      expect(() => run("start", "--recent")).toThrow(/--recent/);
+    });
+
+    it("throws when --recent is followed by another flag", () => {
+      expect(() => run("start", "--recent", "--verbose")).toThrow(/--recent/);
+    });
+
+    it("throws on non-numeric --recent", () => {
+      expect(() => run("start", "--recent", "abc")).toThrow(
+        /positive integer/,
+      );
+    });
+
+    it("throws on zero --recent", () => {
+      expect(() => run("start", "--recent", "0")).toThrow(/positive integer/);
+    });
+
+    it("throws on negative --recent (next-token-as-flag check fires first)", () => {
+      // "-3" begins with '-' so it triggers the missing-value branch.
+      expect(() => run("start", "--recent", "-3")).toThrow(/--recent/);
+    });
+
+    it("throws on fractional --recent", () => {
+      expect(() => run("start", "--recent", "1.5")).toThrow(
+        /positive integer/,
+      );
+    });
+
+    it("throws on empty-string --recent", () => {
+      expect(() => run("start", "--recent", "")).toThrow(/positive integer/);
+    });
+
+    it("ArgvParseError for --recent carries exit code 2", () => {
+      try {
+        run("start", "--recent", "abc");
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        expect(err).toBeInstanceOf(ArgvParseError);
+        expect((err as ArgvParseError).exitCode).toBe(2);
+      }
+    });
+  });
+
   it("throws when --discover has no value", () => {
     expect(() => run("start", "--discover")).toThrow(/--discover/);
   });

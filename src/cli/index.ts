@@ -53,10 +53,20 @@ async function main(): Promise<number> {
   }
 
   if (parsed.command === "start") {
-    process.stderr.write(
-      "Error: `harvest start` is not yet implemented (Task 20)\n",
-    );
-    return 1;
+    // Lazy-import so `harvest init` / `harvest help` don't pay the cost of
+    // loading the Agent SDK + harvest server at startup.
+    const { runStart } = await import("./start.js");
+    const startOpts: import("./start.js").StartOptions = {
+      cwd: process.cwd(),
+      dryRun: parsed.flags.dryRun,
+      verbose: parsed.flags.verbose,
+      json: parsed.flags.json,
+    };
+    if (parsed.flags.discover !== undefined) startOpts.discover = parsed.flags.discover;
+    if (parsed.flags.recent !== undefined) startOpts.recent = parsed.flags.recent;
+    if (parsed.flags.since !== undefined) startOpts.since = parsed.flags.since;
+    if (parsed.flags.model !== undefined) startOpts.model = parsed.flags.model;
+    return runStart(startOpts);
   }
 
   process.stderr.write(`Error: unknown command \`${parsed.command}\`\n`);
@@ -78,6 +88,7 @@ Init flags:
 
 Start flags:
   --discover <path>   Discover .harvest/ under <path>.
+  --recent <N>        Process only the most recent N unprocessed sessions.
   --since <ISO8601>   Only sessions after this time.
   --model <name>      Override the LLM model.
   --dry-run           Don't write anything; report only.

@@ -18,8 +18,9 @@
  *     `version`. Anything else → throw.
  *   - Bare `--help`/`-h` with no command → command = "help".
  *   - Bare `--version`/`-v` with no command → command = "version".
- *   - `--<flag> <value>` for value flags (`--discover`, `--since`, `--model`).
- *     Missing value → throw.
+ *   - `--<flag> <value>` for value flags (`--discover`, `--since`, `--model`,
+ *     `--recent`). Missing value → throw. `--recent` additionally validates the
+ *     value as a positive integer (DESIGN_PROPOSALS P-1).
  *   - `--<flag>` for booleans (`--scan`, `--root`, `--verbose`, `--json`,
  *     `--dry-run`).
  *   - Unknown flag → throw with the offending token.
@@ -49,6 +50,9 @@ export interface ParsedArgs {
     since?: string;
     /** `start --model <name>` — LLM model override. */
     model?: string;
+    /** `start --recent <N>` — process only the most recent N unprocessed
+     *  sessions (DESIGN_PROPOSALS P-1). N is a positive integer. */
+    recent?: number;
     /** `start --dry-run` — report only, don't write. */
     dryRun: boolean;
     /** `--help` / `-h`. */
@@ -148,6 +152,27 @@ export function parseArgs(argv: string[]): ParsedArgs {
           throw new ArgvParseError(`--model requires a value`);
         }
         flags.model = v;
+        i += 1;
+        break;
+      }
+      case "--recent": {
+        // P-1 (DESIGN_PROPOSALS): a positive integer. Anything else is a
+        // user-input error (exit 2). We deliberately reject zero / negatives
+        // here rather than later — the spec contract is "process the most
+        // recent N", and N must be a real count.
+        const v = args[i + 1];
+        if (v === undefined || v.startsWith("-")) {
+          throw new ArgvParseError(`--recent requires a value`);
+        }
+        // Use Number() rather than parseInt() so we reject "12abc" / "1.5"
+        // / "" / "NaN" cleanly. parseInt would silently accept "12abc".
+        const n = Number(v);
+        if (!Number.isInteger(n) || n <= 0) {
+          throw new ArgvParseError(
+            `--recent requires a positive integer, got: ${v}`,
+          );
+        }
+        flags.recent = n;
         i += 1;
         break;
       }
