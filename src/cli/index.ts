@@ -14,10 +14,22 @@
  */
 
 import { ArgvParseError, parseArgs } from "./argv.js";
+import { loadEnvFiles } from "./env.js";
 import { runInit } from "./init.js";
 import { nowIso } from "../core/time.js";
 
 async function main(): Promise<number> {
+  // Merge `.env` / `.env.local` into process.env BEFORE any command runs.
+  // All env reads in this codebase are lazy (inside functions, not at module
+  // top-level), so loading here is sufficient. Shell-set vars always win;
+  // see ./env.ts for precedence rules.
+  const envLoad = loadEnvFiles({ cwd: process.cwd() });
+  if (process.env["HARVEST_DEBUG"] && envLoad.loaded.length > 0) {
+    process.stderr.write(
+      `harvest: loaded env from ${envLoad.loaded.join(", ")} (${envLoad.applied.length} keys applied, ${envLoad.skipped.length} kept from shell)\n`,
+    );
+  }
+
   let parsed;
   try {
     parsed = parseArgs(process.argv);
