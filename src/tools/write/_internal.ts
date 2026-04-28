@@ -531,3 +531,52 @@ export function posixRelative(from: string, to: string): string {
 // -----------------------------------------------------------------------------
 
 export { CATEGORIES };
+
+// -----------------------------------------------------------------------------
+// Per-KB in-process write mutex.
+//
+// Vercel AI SDK issues parallel tool calls within a single step. The on-disk
+// `<kb>/.lock` excludes other PROCESSES, but two `create_item` tool calls
+// inside the same process are scheduled concurrently and both call
+// `allocateId` before either has written its file — so both see the same
+// `max(seq)` and both return the same next id. We close that gap by queueing
+// write-tool bodies per absolute KB path.
+//
+// A simple promise chain keyed by `kbPath` is enough; we never `await` the
+// chain inside itself, so there's no deadlock risk. The chain holds at most
+// one in-flight task plus its waiters; on resolution/rejection we advance to
+// the next.
+// -----------------------------------------------------------------------------
+
+const kbWriteChains = new Map<string, Promise<unknown>>();
+
+/**
+ * Run `fn` while holding an in-process exclusive lock keyed on `kbPath`.
+ * Concurrent invocations against the same `kbPath` execute one-at-a-time in
+ * FIFO order. Calls against different `kbPath`s are independent.
+ *
+ * The lock is released whether `fn` resolves or rejects. Rejections propagate
+ * unchanged.
+ */
+export async function withKbWriteLock<T>(
+  kbPath: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const prev = kbWriteChains.get(kbPath) ?? Promise.resolve();
+  // Swallow `prev`'s rejection here so a failed predecessor doesn't poison
+  // the chain; the predecessor's own caller already received the rejection.
+  const next = prev.then(
+    () => fn(),
+    () => fn(),
+  );
+  kbWriteChains.set(kbPath, next);
+  try {
+    return await next;
+  } finally {
+    // If we're still the tail, clear the entry so the map doesn't grow
+    // forever for ephemeral KB paths used in tests.
+    if (kbWriteChains.get(kbPath) === next) {
+      kbWriteChains.delete(kbPath);
+    }
+  }
+}
