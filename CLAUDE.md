@@ -93,6 +93,8 @@ Concretely:
 
 ## Environment variables
 
+User-level config (provider, API keys, etc.) is read from `~/.harvest/config.json`, the **single authoritative source** — see `src/cli/user-config.ts`. The CLI auto-creates this file with all keys present and empty on the very first invocation, prints a stderr guide, and exits 0. Fill in your provider + API key, re-run, and subsequent runs apply the file's non-empty values to `process.env` (overwriting anything already there). There is no fallback to CWD `.env` / `.env.local` — that loader was removed. Dev-only knobs (`HARVEST_TEST_LLM`, `HARVEST_DEBUG`) are not in the template; pass them via shell env when needed.
+
 | Var | Purpose |
 |---|---|
 | `HARVEST_PROVIDER` | `anthropic` (default) / `openai` / `google`. Wins under `--provider` flag. |

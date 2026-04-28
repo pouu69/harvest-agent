@@ -43,7 +43,8 @@ export function createAnthropicModel(
 ): LanguageModel {
   if (!opts.apiKey) {
     throw new Error(
-      "ANTHROPIC_API_KEY is not set. Required when HARVEST_PROVIDER=anthropic.",
+      "ANTHROPIC_API_KEY is not set. Required when HARVEST_PROVIDER=anthropic. " +
+        "Edit ~/.harvest/config.json and set ANTHROPIC_API_KEY.",
     );
   }
 

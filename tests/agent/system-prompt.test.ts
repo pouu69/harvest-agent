@@ -62,7 +62,7 @@ describe("AGENT_SYSTEM_PROMPT", () => {
     // matching close — works for any N >= 3 backticks and resists drift
     // OUTSIDE §8.2 (re-indexing other sections of the spec doesn't break
     // this test as long as the §8.2 header text is stable).
-    const specPath = path.resolve(__dirname, "../../harvest.md");
+    const specPath = path.resolve(__dirname, "../../docs/harvest.md");
     const lines = readFileSync(specPath, "utf-8").split("\n");
 
     const headerIdx = lines.findIndex((l) =>

@@ -11,7 +11,16 @@ module.exports = {
     "eslint:recommended",
     "plugin:@typescript-eslint/recommended",
   ],
-  ignorePatterns: ["dist/", "node_modules/", "coverage/", ".vitest/"],
+  ignorePatterns: [
+    "dist/",
+    "node_modules/",
+    "coverage/",
+    ".vitest/",
+    // pitch-deck/ is a standalone browser slide deck (HTML/CSS/JS) — not
+    // part of the harvest CLI source. Browser globals trip no-undef under
+    // the project's Node-oriented config; lint it separately if needed.
+    "pitch-deck/",
+  ],
   rules: {
     // Enforce CLI -> Agent -> Tools -> LLM -> Core layered import direction
     // (per harvest.md §14.2; `llm/` slotted between `core/` and `tools/` by

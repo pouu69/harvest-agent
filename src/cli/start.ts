@@ -141,7 +141,7 @@ export async function runStart(opts: StartOptions): Promise<number> {
     if (keyVal === undefined || keyVal === "") {
       stderr.write(
         `Error: ${keyEnv} is not set. Required when HARVEST_PROVIDER=${resolvedProvider}.\n` +
-          `       Export it in your shell or add it to .env / .env.local.\n`,
+          `       Edit ~/.harvest/config.json and set ${keyEnv}.\n`,
       );
       return 5;
     }

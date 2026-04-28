@@ -14,19 +14,28 @@
  */
 
 import { ArgvParseError, parseArgs } from "./argv.js";
-import { loadEnvFiles } from "./env.js";
 import { runInit } from "./init.js";
+import { ensureUserConfig, loadAndApplyUserConfig } from "./user-config.js";
 import { nowIso } from "../core/time.js";
 
 async function main(): Promise<number> {
-  // Merge `.env` / `.env.local` into process.env BEFORE any command runs.
-  // All env reads in this codebase are lazy (inside functions, not at module
-  // top-level), so loading here is sufficient. Shell-set vars always win;
-  // see ./env.ts for precedence rules.
-  const envLoad = loadEnvFiles({ cwd: process.cwd() });
-  if (process.env["HARVEST_DEBUG"] && envLoad.loaded.length > 0) {
+  // Bootstrap the user-level config file before anything else. On the very
+  // first run this writes `~/.harvest/config.json` with all keys present
+  // and empty, prints a stderr guide, and we exit 0 — the user fills in
+  // their provider/API key and re-runs. On subsequent runs it's a no-op
+  // and we copy non-empty string values into `process.env` so the rest of
+  // the CLI (which reads env lazily) sees them.
+  //
+  // `~/.harvest/config.json` is the single authoritative source by design —
+  // see ./user-config.ts. We do not load CWD `.env(.local)` anymore.
+  const userCfg = await ensureUserConfig();
+  if (userCfg.created) {
+    return 0;
+  }
+  const applied = await loadAndApplyUserConfig({ path: userCfg.path });
+  if (process.env["HARVEST_DEBUG"]) {
     process.stderr.write(
-      `harvest: loaded env from ${envLoad.loaded.join(", ")} (${envLoad.applied.length} keys applied, ${envLoad.skipped.length} kept from shell)\n`,
+      `harvest: applied ${applied} keys from ${userCfg.path}\n`,
     );
   }
 
