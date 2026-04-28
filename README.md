@@ -162,10 +162,19 @@ harvest init
 
 **사용자 설정** — provider / API key 는 `~/.harvest/config.json` **한 곳에서만** 관리한다. 다른 프로젝트로 이동해도 같은 설정이 따라간다.
 
-처음으로 `harvest` 를 실행하면 (`harvest --version`, `harvest --help`, 무엇이든) `~/.harvest/config.json` 이 자동 생성되고, stderr 에 안내가 출력된 뒤 exit 0 으로 종료된다. 자동 생성된 파일은 다음과 같이 모든 키가 빈 문자열로 들어 있다:
+처음으로 `harvest` 를 실행하면 (`harvest --version`, `harvest --help`, 무엇이든) `~/.harvest/config.json` 이 자동 생성되고, stderr 에 안내가 출력된 뒤 exit 0 으로 종료된다. 자동 생성된 파일은 다음과 같이 맨 위 `_README` 인라인 도움말 + 모든 환경변수 키가 빈 문자열로 들어 있다:
 
 ```json
 {
+  "_README": [
+    "Edit this file to configure harvest. Empty value = unset (use defaults).",
+    "Non-empty values overwrite process.env on every run; this file is the",
+    "single authoritative source — there is no fallback to project .env files.",
+    "",
+    "HARVEST_PROVIDER             : anthropic | openai | google",
+    "ANTHROPIC_API_KEY            : https://console.anthropic.com/",
+    "..."
+  ],
   "HARVEST_PROVIDER": "",
   "HARVEST_MODEL": "",
   "HARVEST_EXTRACT_MODEL": "",
@@ -176,6 +185,8 @@ harvest init
   "HARVEST_TRANSCRIPT_DIR": ""
 }
 ```
+
+`_README` 는 JSON 에 주석을 달 수 없어 도입한 인라인 가이드 — 로더가 비-문자열 값을 무시하므로 그대로 두어도 무해하다. 다른 `_`-prefix 메타데이터를 적어두는 용도로도 쓸 수 있다.
 
 사용할 provider 와 그에 맞는 API key 만 채우면 된다. 예: OpenAI 로 가려면
 
