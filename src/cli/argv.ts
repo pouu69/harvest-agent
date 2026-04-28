@@ -48,11 +48,14 @@ export interface ParsedArgs {
     verbose: boolean;
     /** `start --json` — machine-readable output. */
     json: boolean;
-    /** `init --scan` — deprecated alias. Auto-detect is the default behavior
-     *  per SPEC_DEFECTS I-13; the flag is kept for backward compatibility and
-     *  only affects whether `runInit` emits the "No monorepo config detected"
-     *  acknowledgment in non-monorepo dirs. */
+    /** `init --scan` — deprecated alias for `--all` (SPEC_DEFECTS I-14). */
     scan: boolean;
+    /** `init --all` — create `.harvest/` at the monorepo root and every
+     *  detected workspace, instead of the I-14 default of "cwd + monorepo
+     *  root". */
+    all: boolean;
+    /** `init --yes` — skip the I-14 confirmation prompt. */
+    yes: boolean;
     /** `init --root` — mark this KB as the chain root. */
     root: boolean;
     /** `start --since <ISO8601>` — only sessions after this time. */
@@ -108,6 +111,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     verbose: false,
     json: false,
     scan: false,
+    all: false,
+    yes: false,
     root: false,
     dryRun: false,
     help: false,
@@ -211,6 +216,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
         break;
       case "--scan":
         flags.scan = true;
+        break;
+      case "--all":
+        flags.all = true;
+        break;
+      case "--yes":
+        flags.yes = true;
         break;
       case "--root":
         flags.root = true;

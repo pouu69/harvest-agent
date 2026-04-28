@@ -247,6 +247,45 @@ export function nowIso(): string {
 
 **부수 변경 (`harvest start` 요약 라인)**: `✓ Harvest run complete (12 turns, $0.0000 total)` 의 `$0.0000` 은 AI SDK 가 provider 별 cost 를 normalize 하지 않아 항상 0 으로 표시되어 오해 유발. 토큰 카운트 (`47.5K in / 12.3K out tokens`) 로 교체. `RunAgentResult` 에 `inputTokens` / `outputTokens` 추가, `RunState.inputTokens` / `outputTokens` 추가, `formatTokenUsage` / `formatTokenCount` 헬퍼 도입. Cost 는 per-provider price helper 가 도입되면 다시 추가 가능.
 
+### I-14. `harvest init` 의 일괄 생성 정책 — 사용자 의도 기반으로 좁힘
+
+**상태**: ✅ **resolved** (2026-04-28)
+
+**위치**: §12.1 `harvest init` 정의 + I-13 의 후속 결함
+
+**원래 결함**: I-13 으로 `harvest init` 이 monorepo 를 자동 감지해 *모든* workspace 에 `.harvest/` 를 일괄 생성하게 됐다. 그런데 실제 사용자 dogfooding (`/Users/<id>/.../webdev/one`, nx + pnpm 모노레포, `project.json` 46개) 에서 다음 두 결함이 드러남:
+
+1. **양적 폭주**: 한 명령으로 47 개 KB가 생기는 건 사용자가 "조용히 .harvest 좀 두고 싶다" 는 일반적 의도와 거리가 멀다. 빈 KB 가 다수 생성되며 CLAUDE.md chain 이 비대해진다.
+2. **pnpm-workspace.yaml fall-through 버그** (I-13 와 동일 패턴): `packages:` 필드가 주석/누락된 pnpm-workspace.yaml (예: `onlyBuiltDependencies` / `overrides` 만 사용) 에서 detection 이 빈 paths 를 반환한 채 거기서 멈춰버림. 다른 source (package.json/turbo.json/Cargo.toml/go.work) 분기에는 `ws.length > 0` 가드가 있는데 pnpm 만 빠져 있었음.
+3. **nx workspace 미지원**: nx.json 만으로는 workspace inventory 를 알 수 없다는 이유로 detection 이 manual-init 메시지로 bail out 했음. 이는 위 1번에서는 "다행"이었지만 사용자가 명시적으로 일괄 생성을 원할 때조차 nx 를 무시하게 만들었음.
+
+**측정된 사례**:
+- 위 모노레포에서 `harvest init` → root 한 곳에만 silent 생성. 사용자: "왜 monorepo 인경우 하위 탐색해서 app 하위에 .harvest 생성안해? 생성하도록 수정했었는데."
+- I-13 fix 후에도 같은 repo 에서 root 한 곳만 생기는데, 이는 (a) pnpm fall-through 누락 + (b) nx detection bail 로 인해 detection 이 zero-paths 로 떨어져 single-KB 분기를 탔기 때문.
+
+**해소** (사용자 합의 결과):
+
+1. **default 좁힘**: `harvest init` (no flag) 이 monorepo workspace dir 안에서 실행되면 *cwd + monorepo root* 두 곳만 생성. cwd === monorepo root 면 root 한 곳만. monorepo signal 이 없으면 cwd 단일 (pre-I-13 동작 보존).
+2. **`--all` 신설**: 기존 I-13 의 "감지된 모든 workspace + root" 동작은 명시적 opt-in 인 `--all` 로 옮김. `--scan` 은 `--all` 의 deprecated alias 로 유지.
+3. **`--yes` 신설**: 모든 confirm 프롬프트를 스킵. CI / 비-TTY 환경 필수.
+4. **confirm 프롬프트**: 다중 dir 생성 시 (default cwd+root, --all) "harvest init will create .harvest/ in: ... Proceed? [y/N]" 출력 후 y/n 입력 대기. 비-TTY 에서 `confirm` 콜백이 없으면 `--yes` re-run 안내 후 exit 2.
+5. **pnpm fall-through 가드**: `detectWorkspaces` 의 pnpm 분기에 `if (ws.length > 0)` 추가. 다른 source 와 동작 일치.
+6. **nx project.json walking**: nx.json 분기에서 immediate bail 대신 깊이 4 까지 `project.json` 파일을 walk 해서 그 부모 dir 들을 workspace 로 사용. 매칭 0 개면 기존 manual-init 메시지로 fallback.
+7. **monorepo root 자동 walk-up**: 새 `findMonorepoRoot(cwd, {homedir})` 가 cwd 부터 위로 올라가 가장 *위쪽* 의 monorepo signal (pnpm-workspace.yaml / package.json `workspaces` / turbo.json / nx.json / Cargo.toml / go.work) 을 찾는다. homedir (또는 FS root) 이 ceiling. leaf `package.json` 만으로는 signal 로 보지 않음 — 그러면 모든 node 프로젝트가 monorepo 가 됨.
+
+**구현 위치**:
+- `src/cli/init.ts` — `runInit` 분기 재배치 (`all` 분기 / default 분기 / single-KB 분기), 새 `findMonorepoRoot` export, 새 `findNxProjectDirs` 헬퍼, 새 `runMultiInit` (default 다중) + `confirmPlan` (3-way 결과). pnpm 분기의 `ws.length > 0` 가드.
+- `src/cli/argv.ts` — `--all`, `--yes` 신설. `--scan` JSDoc 만 alias 로 갱신.
+- `src/cli/index.ts` — `runInit` 호출에 `all` / `yes` 전달. TTY 감지 후 `ttyConfirm` 콜백 (`node:readline/promises`) 주입. `printUsage` 갱신.
+- `tests/cli/init.test.ts` — `findMonorepoRoot` 7 개, `runInit (default: cwd + monorepo root)` 6 개, `runInit (--all)` 3 개 신설. 기존 I-13 의 "auto-detect, no --scan" 케이스들은 `--all detection plumbing` 으로 의미를 바꿔 `all: true, yes: true` 로 마이그레이션.
+
+**KB 출력 영향**:
+- (개선) monorepo workspace 안에서 `harvest init` → 의도대로 cwd + root 만. 빈 KB 폭주 없음.
+- (개선) nx 모노레포에서 `harvest init --all` → `project.json` 마커 기반으로 정확한 workspace 인벤토리 인식.
+- (의도된 행동 변경) **I-13 의 default 동작이었던 "모든 workspace 일괄 생성" 은 이제 `--all` 명시 시에만**. 기존 I-13 사용자가 `harvest init` 만 입력해도 "전체 생성" 을 기대했다면 회귀처럼 보일 수 있음 — 그러나 위 사용자 보고처럼 그 default 가 본질적으로 잘못 잡혀 있었기 때문에 의도된 좁힘.
+- (회귀 0) 비-monorepo 단일 dir 사용자: 출력 동일.
+- (회귀 0) `harvest init --scan` 사용자: alias 로 보존, `--yes` 또는 TTY 확인이 추가됐다는 점만 다름.
+
 ### I-13. `harvest init` 기본이 monorepo 신호를 무시하고 단일 KB 만 생성
 
 **상태**: ✅ **resolved** (2026-04-28)

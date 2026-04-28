@@ -12,7 +12,7 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { runInit } from "../../src/cli/init.js";
+import { findMonorepoRoot, runInit } from "../../src/cli/init.js";
 
 /**
  * `runInit` is exercised against real temp dirs (no fs mocking) so we get
@@ -221,12 +221,48 @@ describe("runInit (single-KB mode)", () => {
   });
 });
 
-describe("runInit (auto-detect, no --scan)", () => {
-  // Per user-driven spec amendment (SPEC_DEFECTS I-13): `harvest init` must
-  // auto-detect monorepo config without requiring `--scan`. The flag stays as
-  // a backward-compatible alias whose only behavioral effect is the explicit
-  // "No monorepo config detected" fallback message.
-  it("auto-detects pnpm-workspace.yaml and inits root + each workspace", async () => {
+describe("runInit (--all detection plumbing)", () => {
+  // I-14 narrowed the *default* `harvest init` to "cwd + monorepo root".
+  // These tests cover the detection logic exercised by `--all` (and its
+  // deprecated `--scan` alias) — pnpm/package.json/nx fall-through, nx
+  // bail when no project.json exists, etc. They all set `all: true,
+  // yes: true` to skip the new I-14 confirmation prompt.
+  it("falls through pnpm-workspace.yaml without `packages:` to next source", async () => {
+    // Real-world repro from /Users/.../webdev/one: a pnpm-workspace.yaml
+    // used purely for `onlyBuiltDependencies` / `overrides` config (no
+    // `packages:` field at all), with the actual workspace inventory
+    // declared elsewhere (here: package.json). Detection must not stop
+    // at pnpm-workspace.yaml when it has zero packages — that's the I-14
+    // companion bug to I-13's silent single-KB fallback.
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "onlyBuiltDependencies:\n  - sharp\n",
+    );
+    writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "x", workspaces: ["packages/*"] }),
+    );
+    mkdirSync(path.join(root, "packages", "core"), { recursive: true });
+
+    const stdout = fakeStdout();
+    await runInit({
+      cwd: root,
+      scan: false,
+      all: true,
+      yes: true,
+      root: false,
+      nowIso: ISO,
+      stdout,
+      homedir: root,
+    });
+
+    expect(captured(stdout)).toContain("(package.json)");
+    expect(existsSync(path.join(root, "packages", "core", ".harvest"))).toBe(
+      true,
+    );
+  });
+
+  it("--all on pnpm-workspace.yaml inits root + each workspace", async () => {
     writeFileSync(
       path.join(root, "pnpm-workspace.yaml"),
       "packages:\n  - 'apps/*'\n",
@@ -238,9 +274,12 @@ describe("runInit (auto-detect, no --scan)", () => {
     const code = await runInit({
       cwd: root,
       scan: false,
+      all: true,
+      yes: true,
       root: false,
       nowIso: ISO,
       stdout,
+      homedir: root,
     });
     expect(code).toBe(0);
 
@@ -253,7 +292,7 @@ describe("runInit (auto-detect, no --scan)", () => {
     expect(out).toContain("✓ Created .harvest/ in 3 locations");
   });
 
-  it("auto-detects package.json workspaces without --scan", async () => {
+  it("--all on package.json workspaces inits root + each workspace", async () => {
     writeFileSync(
       path.join(root, "package.json"),
       JSON.stringify({ name: "x", workspaces: ["packages/*"] }),
@@ -264,9 +303,12 @@ describe("runInit (auto-detect, no --scan)", () => {
     await runInit({
       cwd: root,
       scan: false,
+      all: true,
+      yes: true,
       root: false,
       nowIso: ISO,
       stdout,
+      homedir: root,
     });
 
     expect(existsSync(path.join(root, ".harvest"))).toBe(true);
@@ -276,26 +318,75 @@ describe("runInit (auto-detect, no --scan)", () => {
     expect(captured(stdout)).toContain("(package.json)");
   });
 
-  it("nx.json without --scan also bails out (no silent single-KB)", async () => {
-    // SPEC_DEFECTS I-13 "KB 출력 영향" 의 의도된 행동 변경 가드: 변경 전엔 nx.json
-    // 만 있는 dir 에서 `harvest init` (no scan) 이 cwd 에 silent 로 단일 .harvest/
-    // 를 만들었다. 변경 후엔 manual-init 힌트만 출력하고 .harvest/ 는 만들지
-    // 않는다 — 다른 monorepo 도구의 동작과 일관시키기 위한 의도된 변경.
+  it("--all walks nx project.json files when nx.json is the workspace source", async () => {
+    // I-14: nx repos used to bail out of detection because nx.json itself
+    // doesn't declare workspace paths. The user-driven design switched to
+    // walking for project.json files (nx's per-project marker) up to a
+    // bounded depth, which yields a clean inventory in the common nx +
+    // pnpm + apps/libs layout.
+    writeFileSync(path.join(root, "nx.json"), "{}");
+    mkdirSync(path.join(root, "apps", "web"), { recursive: true });
+    mkdirSync(path.join(root, "apps", "openchat", "main"), { recursive: true });
+    mkdirSync(path.join(root, "libs", "ui"), { recursive: true });
+    writeFileSync(
+      path.join(root, "apps", "web", "project.json"),
+      JSON.stringify({ name: "web" }),
+    );
+    writeFileSync(
+      path.join(root, "apps", "openchat", "main", "project.json"),
+      JSON.stringify({ name: "openchat-main" }),
+    );
+    writeFileSync(
+      path.join(root, "libs", "ui", "project.json"),
+      JSON.stringify({ name: "ui" }),
+    );
+
+    const stdout = fakeStdout();
+    const code = await runInit({
+      cwd: root,
+      scan: false,
+      all: true,
+      yes: true,
+      root: false,
+      nowIso: ISO,
+      stdout,
+      homedir: root,
+    });
+    expect(code).toBe(0);
+
+    expect(captured(stdout)).toContain("(nx.json)");
+    expect(
+      existsSync(path.join(root, "apps", "web", ".harvest")),
+    ).toBe(true);
+    expect(
+      existsSync(path.join(root, "apps", "openchat", "main", ".harvest")),
+    ).toBe(true);
+    expect(existsSync(path.join(root, "libs", "ui", ".harvest"))).toBe(true);
+    expect(existsSync(path.join(root, ".harvest"))).toBe(true);
+  });
+
+  it("--all on nx.json without project.json files bails with the manual hint", async () => {
+    // Edge: nx.json present but no project.json anywhere (broken / fresh
+    // nx workspace). We don't invent workspaces from thin air — fall back
+    // to the I-13 manual-init hint so the user is aware.
     writeFileSync(path.join(root, "nx.json"), "{}");
     const stdout = fakeStdout();
     const code = await runInit({
       cwd: root,
       scan: false,
+      all: true,
+      yes: true,
       root: false,
       nowIso: ISO,
       stdout,
+      homedir: root,
     });
     expect(code).toBe(0);
     expect(captured(stdout)).toContain("nx.json detected");
     expect(existsSync(path.join(root, ".harvest"))).toBe(false);
   });
 
-  it("monorepo idempotency: second run prints Already initialized for each ws", async () => {
+  it("--all monorepo idempotency: second run prints Already initialized for each ws", async () => {
     writeFileSync(
       path.join(root, "pnpm-workspace.yaml"),
       "packages:\n  - 'apps/*'\n",
@@ -306,9 +397,12 @@ describe("runInit (auto-detect, no --scan)", () => {
       await runInit({
         cwd: root,
         scan: false,
+        all: true,
+        yes: true,
         root: false,
         nowIso: ISO,
         stdout: fakeStdout(),
+        homedir: root,
       }),
     ).toBe(0);
 
@@ -317,9 +411,12 @@ describe("runInit (auto-detect, no --scan)", () => {
       await runInit({
         cwd: root,
         scan: false,
+        all: true,
+        yes: true,
         root: false,
         nowIso: ISO,
         stdout: second,
+        homedir: root,
       }),
     ).toBe(0);
 
@@ -333,11 +430,10 @@ describe("runInit (auto-detect, no --scan)", () => {
     expect(out).not.toMatch(/✓ Created \.harvest\/ in \//);
   });
 
-  it("plain dir without --scan stays silent about monorepo detection", async () => {
+  it("plain dir stays silent about monorepo detection", async () => {
     // Regression guard: the single-KB output must NOT mention monorepo
-    // detection at all when there is no monorepo config and the user did not
-    // pass --scan explicitly. Existing `harvest init` users see the same
-    // output as before this change.
+    // detection at all when there is no monorepo config. Existing
+    // `harvest init` users see the same output as before I-14.
     const stdout = fakeStdout();
     await runInit({
       cwd: root,
@@ -345,6 +441,7 @@ describe("runInit (auto-detect, no --scan)", () => {
       root: false,
       nowIso: ISO,
       stdout,
+      homedir: root,
     });
     const out = captured(stdout);
     expect(out).not.toContain("No monorepo config detected");
@@ -352,7 +449,353 @@ describe("runInit (auto-detect, no --scan)", () => {
   });
 });
 
-describe("runInit (--scan)", () => {
+describe("runInit (default: cwd + monorepo root)", () => {
+  // SPEC_DEFECTS I-14: `harvest init` from inside a monorepo workspace
+  // creates `.harvest/` at cwd AND at the monorepo root, prompting for
+  // confirmation. `--all` opts back into the I-13 "everywhere" behavior;
+  // `--yes` skips the prompt.
+  it("creates cwd + monorepo root when cwd is inside a workspace", async () => {
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    const ws = path.join(root, "apps", "web");
+    mkdirSync(ws, { recursive: true });
+
+    const stdout = fakeStdout();
+    const code = await runInit({
+      cwd: ws,
+      scan: false,
+      all: false,
+      yes: true,
+      root: false,
+      nowIso: ISO,
+      stdout,
+      homedir: root,
+    });
+    expect(code).toBe(0);
+
+    expect(existsSync(path.join(ws, ".harvest"))).toBe(true);
+    expect(existsSync(path.join(root, ".harvest"))).toBe(true);
+    // Other workspaces are untouched — that's the whole point of I-14.
+    expect(existsSync(path.join(root, "apps", "api", ".harvest"))).toBe(false);
+  });
+
+  it("creates only root when cwd === monorepo root", async () => {
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    mkdirSync(path.join(root, "apps", "web"), { recursive: true });
+
+    const stdout = fakeStdout();
+    await runInit({
+      cwd: root,
+      scan: false,
+      all: false,
+      yes: true,
+      root: false,
+      nowIso: ISO,
+      stdout,
+      homedir: root,
+    });
+
+    expect(existsSync(path.join(root, ".harvest"))).toBe(true);
+    expect(existsSync(path.join(root, "apps", "web", ".harvest"))).toBe(false);
+  });
+
+  it("falls back to single-KB when cwd is in a non-monorepo dir", async () => {
+    // No monorepo signal anywhere: behaves exactly like the original
+    // pre-I-13/I-14 single-KB path. Regression guard for non-monorepo users.
+    const stdout = fakeStdout();
+    await runInit({
+      cwd: root,
+      scan: false,
+      all: false,
+      yes: true,
+      root: false,
+      nowIso: ISO,
+      stdout,
+      homedir: root,
+    });
+    expect(existsSync(path.join(root, ".harvest"))).toBe(true);
+    expect(captured(stdout)).toContain("✓ Created .harvest/");
+  });
+
+  it("non-TTY without --yes → exit 2, prints planned list + re-run hint, no creation", async () => {
+    // Production wires `confirm` only when stdin.isTTY; in a piped/CI
+    // invocation the field is undefined, which must turn into a refusal
+    // (exit 2) rather than wedging the CLI on a phantom prompt.
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    const ws = path.join(root, "apps", "web");
+    mkdirSync(ws, { recursive: true });
+
+    const stdout = fakeStdout();
+    const code = await runInit({
+      cwd: ws,
+      scan: false,
+      all: false,
+      yes: false,
+      root: false,
+      nowIso: ISO,
+      stdout,
+      homedir: root,
+      // confirm intentionally omitted — simulates non-TTY
+    });
+
+    expect(code).toBe(2);
+    expect(existsSync(path.join(ws, ".harvest"))).toBe(false);
+    expect(existsSync(path.join(root, ".harvest"))).toBe(false);
+    const out = captured(stdout);
+    expect(out).toContain("harvest init will create .harvest/ in:");
+    expect(out).toContain("Re-run with --yes to confirm");
+  });
+
+  it("declined confirm → no .harvest created, exit 0", async () => {
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    const ws = path.join(root, "apps", "web");
+    mkdirSync(ws, { recursive: true });
+
+    const stdout = fakeStdout();
+    const code = await runInit({
+      cwd: ws,
+      scan: false,
+      all: false,
+      yes: false,
+      root: false,
+      nowIso: ISO,
+      stdout,
+      homedir: root,
+      confirm: async () => false,
+    });
+    expect(code).toBe(0);
+    expect(existsSync(path.join(ws, ".harvest"))).toBe(false);
+    expect(existsSync(path.join(root, ".harvest"))).toBe(false);
+    expect(captured(stdout)).toContain("Aborted");
+  });
+
+  it("prompt shows the full list of planned directories", async () => {
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    const ws = path.join(root, "apps", "web");
+    mkdirSync(ws, { recursive: true });
+
+    let promptedWith: string[] = [];
+    await runInit({
+      cwd: ws,
+      scan: false,
+      all: false,
+      yes: false,
+      root: false,
+      nowIso: ISO,
+      stdout: fakeStdout(),
+      homedir: root,
+      confirm: async (planned) => {
+        promptedWith = planned;
+        return true;
+      },
+    });
+
+    // Two entries: workspace dir and monorepo root, in deterministic order.
+    expect(promptedWith).toEqual([root, ws]);
+  });
+
+  it("--yes skips the confirm callback entirely", async () => {
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    const ws = path.join(root, "apps", "web");
+    mkdirSync(ws, { recursive: true });
+
+    let confirmCalled = false;
+    await runInit({
+      cwd: ws,
+      scan: false,
+      all: false,
+      yes: true,
+      root: false,
+      nowIso: ISO,
+      stdout: fakeStdout(),
+      homedir: root,
+      confirm: async () => {
+        confirmCalled = true;
+        return true;
+      },
+    });
+
+    expect(confirmCalled).toBe(false);
+    expect(existsSync(path.join(ws, ".harvest"))).toBe(true);
+    expect(existsSync(path.join(root, ".harvest"))).toBe(true);
+  });
+});
+
+describe("runInit (--all)", () => {
+  it("--all creates KBs at root + every detected workspace", async () => {
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    mkdirSync(path.join(root, "apps", "web"), { recursive: true });
+    mkdirSync(path.join(root, "apps", "api"), { recursive: true });
+
+    await runInit({
+      cwd: root,
+      scan: false,
+      all: true,
+      yes: true,
+      root: false,
+      nowIso: ISO,
+      stdout: fakeStdout(),
+      homedir: root,
+    });
+
+    expect(existsSync(path.join(root, ".harvest"))).toBe(true);
+    expect(existsSync(path.join(root, "apps", "web", ".harvest"))).toBe(true);
+    expect(existsSync(path.join(root, "apps", "api", ".harvest"))).toBe(true);
+  });
+
+  it("--all in nx repo creates KBs at every project.json dir + root", async () => {
+    writeFileSync(path.join(root, "nx.json"), "{}");
+    mkdirSync(path.join(root, "apps", "web"), { recursive: true });
+    mkdirSync(path.join(root, "libs", "ui"), { recursive: true });
+    writeFileSync(
+      path.join(root, "apps", "web", "project.json"),
+      JSON.stringify({ name: "web" }),
+    );
+    writeFileSync(
+      path.join(root, "libs", "ui", "project.json"),
+      JSON.stringify({ name: "ui" }),
+    );
+
+    await runInit({
+      cwd: root,
+      scan: false,
+      all: true,
+      yes: true,
+      root: false,
+      nowIso: ISO,
+      stdout: fakeStdout(),
+      homedir: root,
+    });
+
+    expect(existsSync(path.join(root, ".harvest"))).toBe(true);
+    expect(existsSync(path.join(root, "apps", "web", ".harvest"))).toBe(true);
+    expect(existsSync(path.join(root, "libs", "ui", ".harvest"))).toBe(true);
+  });
+
+  it("--all confirm declined → nothing created", async () => {
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    mkdirSync(path.join(root, "apps", "web"), { recursive: true });
+
+    await runInit({
+      cwd: root,
+      scan: false,
+      all: true,
+      yes: false,
+      root: false,
+      nowIso: ISO,
+      stdout: fakeStdout(),
+      homedir: root,
+      confirm: async () => false,
+    });
+
+    expect(existsSync(path.join(root, ".harvest"))).toBe(false);
+    expect(existsSync(path.join(root, "apps", "web", ".harvest"))).toBe(false);
+  });
+});
+
+describe("findMonorepoRoot", () => {
+  // Walks up from `cwd` and returns the *topmost* ancestor that has any
+  // monorepo signal (pnpm-workspace.yaml / package.json workspaces /
+  // turbo.json / nx.json / Cargo.toml / go.work). Used by `harvest init`
+  // to materialize a KB at the repo root in addition to the user's cwd.
+  it("returns null when no ancestor has a monorepo signal", () => {
+    const sub = path.join(root, "apps", "web");
+    mkdirSync(sub, { recursive: true });
+    expect(findMonorepoRoot(sub, { homedir: root })).toBeNull();
+  });
+
+  it("returns cwd itself when cwd has pnpm-workspace.yaml with packages", () => {
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    expect(findMonorepoRoot(root, { homedir: root })).toBe(root);
+  });
+
+  it("walks up from a deeply nested cwd to find the monorepo root", () => {
+    writeFileSync(path.join(root, "nx.json"), "{}");
+    const deep = path.join(root, "apps", "openchat", "main", "src");
+    mkdirSync(deep, { recursive: true });
+    expect(findMonorepoRoot(deep, { homedir: root })).toBe(root);
+  });
+
+  it("recognizes package.json with workspaces field as a monorepo signal", () => {
+    writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "x", workspaces: ["packages/*"] }),
+    );
+    const sub = path.join(root, "packages", "core");
+    mkdirSync(sub, { recursive: true });
+    expect(findMonorepoRoot(sub, { homedir: root })).toBe(root);
+  });
+
+  it("ignores package.json without a workspaces field", () => {
+    // A plain leaf package.json must NOT be treated as a monorepo signal.
+    // Otherwise every node project would think it's a monorepo root.
+    writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ name: "x" }),
+    );
+    expect(findMonorepoRoot(root, { homedir: root })).toBeNull();
+  });
+
+  it("returns the topmost root when multiple ancestors have signals", () => {
+    // Pathological: nested monorepos. Outer pnpm-workspace.yaml + inner
+    // package.json with workspaces. We pick the outermost — that's the
+    // user's "최상위 root" intent.
+    writeFileSync(
+      path.join(root, "pnpm-workspace.yaml"),
+      "packages:\n  - 'apps/*'\n",
+    );
+    const inner = path.join(root, "apps", "sub");
+    mkdirSync(inner, { recursive: true });
+    writeFileSync(
+      path.join(inner, "package.json"),
+      JSON.stringify({ name: "inner", workspaces: ["packages/*"] }),
+    );
+    const cwd = path.join(inner, "packages", "ui");
+    mkdirSync(cwd, { recursive: true });
+    expect(findMonorepoRoot(cwd, { homedir: root })).toBe(root);
+  });
+
+  it("stops at the homedir boundary", () => {
+    // Even if a monorepo signal exists *above* the configured homedir, we
+    // must not escape past it (mirrors findKbChain's homedir guard).
+    const homedir = path.join(root, "home");
+    mkdirSync(homedir, { recursive: true });
+    writeFileSync(path.join(root, "pnpm-workspace.yaml"), "packages: []\n");
+    const cwd = path.join(homedir, "project");
+    mkdirSync(cwd, { recursive: true });
+    expect(findMonorepoRoot(cwd, { homedir })).toBeNull();
+  });
+});
+
+describe("runInit (--scan, deprecated alias for --all)", () => {
+  // I-14: `--scan` is folded into `--all`. Tests pass `yes: true` for the
+  // I-14 confirmation prompt. The scan→all aliasing is what's under test.
   it("detects pnpm-workspace.yaml and inits each app + root", async () => {
     writeFileSync(
       path.join(root, "pnpm-workspace.yaml"),
@@ -366,9 +809,11 @@ describe("runInit (--scan)", () => {
     const code = await runInit({
       cwd: root,
       scan: true,
+      yes: true,
       root: false,
       nowIso: ISO,
       stdout,
+      homedir: root,
     });
     expect(code).toBe(0);
 
@@ -414,9 +859,11 @@ describe("runInit (--scan)", () => {
     await runInit({
       cwd: root,
       scan: true,
+      yes: true,
       root: false,
       nowIso: ISO,
       stdout,
+      homedir: root,
     });
 
     expect(existsSync(path.join(root, ".harvest"))).toBe(true);
@@ -431,9 +878,11 @@ describe("runInit (--scan)", () => {
     const code = await runInit({
       cwd: root,
       scan: true,
+      yes: true,
       root: false,
       nowIso: ISO,
       stdout,
+      homedir: root,
     });
     expect(code).toBe(0);
     expect(existsSync(path.join(root, ".harvest"))).toBe(true);
@@ -446,9 +895,11 @@ describe("runInit (--scan)", () => {
     const code = await runInit({
       cwd: root,
       scan: true,
+      yes: true,
       root: false,
       nowIso: ISO,
       stdout,
+      homedir: root,
     });
     expect(code).toBe(0);
     expect(captured(stdout)).toContain("nx.json detected");

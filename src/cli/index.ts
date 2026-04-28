@@ -67,9 +67,15 @@ async function main(): Promise<number> {
     return runInit({
       cwd: process.cwd(),
       scan: parsed.flags.scan,
+      all: parsed.flags.all,
+      yes: parsed.flags.yes,
       root: parsed.flags.root,
       nowIso: nowIso(),
       stdout: process.stdout,
+      // Only attach a TTY-readline confirm when stdin is interactive. When
+      // piped / scripted, runInit refuses without `--yes` and prints a
+      // re-run hint so we never wedge the CLI waiting on stdin (I-14).
+      ...(process.stdin.isTTY ? { confirm: ttyConfirm } : {}),
     });
   }
 
@@ -95,6 +101,25 @@ async function main(): Promise<number> {
   return 2;
 }
 
+/**
+ * Production confirm callback for `harvest init` (SPEC_DEFECTS I-14).
+ * `runInit` has already printed the planned list to stdout; we just ask
+ * y/N and parse the answer. `planned` is unused — the prompt is generic.
+ */
+async function ttyConfirm(): Promise<boolean> {
+  const readline = await import("node:readline/promises");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const ans = await rl.question("Proceed? [y/N] ");
+    return /^y(es)?$/i.test(ans.trim());
+  } finally {
+    rl.close();
+  }
+}
+
 function printUsage(out: NodeJS.WritableStream): void {
   out.write(`Usage: harvest <command> [flags]
 
@@ -105,7 +130,10 @@ Commands:
   version   Print the harvest CLI version.
 
 Init flags:
-  --scan        Deprecated alias (auto-detect is now the default).
+  --all         Create .harvest/ at every detected workspace + root.
+                Default is "cwd + monorepo root" (I-14).
+  --yes         Skip the y/N confirmation prompt.
+  --scan        Deprecated alias for --all.
   --root        Mark this KB as the root.
 
 Start flags:

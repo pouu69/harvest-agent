@@ -56,7 +56,14 @@ API key 는 CLI argv 로 받지 않는다 (노출 방지). `~/.harvest/config.js
 
 ### 모노레포 자동 감지
 
-`harvest init` 만 실행하면 `pnpm-workspace.yaml` / `turbo.json` / `nx.json` / npm·yarn workspaces / `Cargo.toml` / `go.work` 를 자동 감지하여 워크스페이스마다 KB 를 만든다 (단일 프로젝트면 cwd 한 곳에 생성). `--scan` 플래그는 deprecated alias 로 남아 있을 뿐 동작에 영향 없음. 자식 KB 의 `CLAUDE.md` 는 부모 KB 의 INDEX 까지 함께 import — "더 구체적인 (가까운) KB 가 우선" 규칙으로 충돌을 해소한다.
+모노레포에서 `harvest init` 의 동작은 두 가지다 (SPEC_DEFECTS I-14):
+
+- **default** — `.harvest/` 를 넣고 싶은 디렉토리(워크스페이스 안)로 `cd` 한 뒤 `harvest init` → 그 디렉토리 + monorepo root 두 곳에 KB 생성. 생성될 디렉토리를 먼저 보여주고 y/N 로 확인. cwd 가 monorepo root 자체면 root 한 곳만.
+- **`--all`** — 감지된 모든 워크스페이스 + root 에 일괄 생성 (기존 I-13 의 default 동작이 명시적 opt-in 으로 이동). 동일하게 y/N 확인.
+
+`--yes` 로 프롬프트 스킵 (CI / 비-TTY 필수). `--scan` 은 `--all` 의 deprecated alias.
+
+감지 표지: `pnpm-workspace.yaml` / `package.json` `workspaces` / `turbo.json` / `nx.json` (per-project `project.json` 마커 walk) / `Cargo.toml` / `go.work`. 자식 KB 의 `CLAUDE.md` 는 부모 KB 의 INDEX 까지 함께 import — "더 구체적인 (가까운) KB 가 우선" 규칙으로 충돌을 해소한다.
 
 ### CLAUDE.md 마커 블록 규율
 
@@ -145,13 +152,13 @@ git diff .harvest/                        # 변경 검토
 
 ### 일회성 셋업
 
-**KB 초기화** — 단일 프로젝트도, 모노레포도 같은 명령:
+**KB 초기화** — 단일 프로젝트는 그냥:
 
 ```bash
 harvest init
 ```
 
-monorepo 표지 (`pnpm-workspace.yaml` 등) 가 있으면 root + 각 워크스페이스에 KB 가 자동 생성된다.
+모노레포라면 `.harvest/` 를 두고 싶은 디렉토리로 이동한 뒤 같은 명령. cwd + monorepo root 두 곳에 만들지 y/N 으로 묻는다. 모든 워크스페이스에 한 번에 만들고 싶으면 `harvest init --all`. 비-대화형 환경에선 `--yes` 로 프롬프트 스킵.
 
 **사용자 설정** — provider / API key 는 `~/.harvest/config.json` **한 곳에서만** 관리한다. 다른 프로젝트로 이동해도 같은 설정이 따라간다.
 
@@ -201,7 +208,9 @@ harvest start --dry-run        # 실제 쓰기 없이 의도만 출력
 
 | 플래그 | 설명 |
 |---|---|
-| `--scan` | deprecated alias. 자동 감지가 기본 동작 (SPEC_DEFECTS I-13) |
+| `--all` | 감지된 모든 워크스페이스 + root 에 일괄 생성 (SPEC_DEFECTS I-14) |
+| `--yes` | y/N 확인 프롬프트 스킵 |
+| `--scan` | deprecated alias for `--all` |
 | `--root` | 이 KB 가 체인의 루트임을 표시 |
 
 ### `harvest start`

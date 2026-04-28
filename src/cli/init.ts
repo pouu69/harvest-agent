@@ -41,6 +41,7 @@
 
 import { existsSync, statSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import picomatch from "picomatch";
@@ -58,10 +59,14 @@ import { buildIndexMarkdown } from "../core/kb/index-builder.js";
 export interface InitOptions {
   /** Where to create `.harvest/` (typically `process.cwd()`). */
   cwd: string;
-  /** `--scan`: deprecated alias per SPEC_DEFECTS I-13. Auto-detect is the
-   *  default; this flag now only gates the "No monorepo config detected"
-   *  acknowledgment in non-monorepo dirs. */
+  /** `--scan`: per SPEC_DEFECTS I-14, now an alias for `--all`. Older code
+   *  paths (and pre-I-14 docs) still set this; runInit folds it into `all`. */
   scan: boolean;
+  /** `--all` (I-14): create `.harvest/` at the monorepo root *and* every
+   *  detected workspace, instead of only at cwd + monorepo root. */
+  all?: boolean;
+  /** `--yes` (I-14): skip the confirmation prompt. */
+  yes?: boolean;
   /** `--root`: mark this KB as the chain root. */
   root: boolean;
   /** Injection seam: ISO8601 used for the INDEX `generated_at`. */
@@ -72,6 +77,11 @@ export interface InitOptions {
    *  using a tmpdir outside the user's home don't accidentally break out of
    *  the chain at `os.homedir()`. */
   homedir?: string;
+  /** Injection seam (I-14): asks the user whether to proceed given a list
+   *  of planned `.harvest/` locations. Returns true to proceed, false to
+   *  abort. Production wires this to a TTY readline; tests stub it.
+   *  Skipped entirely when `yes` is true. */
+  confirm?: (planned: string[]) => Promise<boolean>;
 }
 
 /**
@@ -81,39 +91,114 @@ export interface InitOptions {
  * to finish the rest of the list.
  */
 export async function runInit(opts: InitOptions): Promise<number> {
-  const detected = detectWorkspaces(opts.cwd);
+  // I-14: `--scan` is now an alias for `--all`. Both opt in to the
+  // "create at root + every detected workspace" flow; the default is
+  // narrowed to "cwd + monorepo root" so users don't accidentally
+  // explode dozens of empty KBs in large monorepos.
+  const all = (opts.all ?? false) || opts.scan;
+  const monorepoRoot = findMonorepoRoot(opts.cwd, { homedir: opts.homedir });
+  const cwdAbs = path.resolve(opts.cwd);
 
-  // nx.json bail-out is an in-band signal from `detectWorkspaces`. Print the
-  // manual-init hint and exit — same as the old `--scan` behavior, but it
-  // now triggers without the flag because nx workspaces are no different
-  // from any other monorepo from the user's POV. Note this *changes* the
-  // pre-I-13 behavior of `harvest init` (no scan) in an nx-only dir, which
-  // used to silently create a single root `.harvest/`. That silent single-
-  // KB creation was the same I-13 defect as for pnpm/turbo/etc., so the
-  // new bail is consistent — see SPEC_DEFECTS I-13 "KB 출력 영향".
-  if (detected.source === "nx.json") {
-    opts.stdout.write(
-      "nx.json detected; please run `harvest init` per workspace dir manually.\n",
-    );
-    return 0;
-  }
-
-  if (detected.source !== null && detected.paths.length > 0) {
-    return runDetectedScan(opts, detected);
-  }
-
-  // No monorepo config. The "No monorepo config detected" acknowledgment is
-  // gated on `opts.scan` because it only makes sense as a response to an
-  // explicit user request: a plain `harvest init` in a non-monorepo dir
-  // should produce the original single-KB output verbatim (no surprise extra
-  // lines).
-  if (opts.scan) {
+  if (all) {
+    // Detect workspaces from the monorepo root (or cwd if there's no root) so
+    // that running `--all` from any subdirectory still finds the full set.
+    const detectionRoot = monorepoRoot ?? cwdAbs;
+    const detected = detectWorkspaces(detectionRoot);
+    if (detected.source === "nx.json" && detected.paths.length === 0) {
+      opts.stdout.write(
+        "nx.json detected; please run `harvest init` per workspace dir manually.\n",
+      );
+      return 0;
+    }
+    if (detected.source !== null && detected.paths.length > 0) {
+      return runDetectedScan({ ...opts, cwd: detectionRoot }, detected);
+    }
+    // --all on a non-monorepo dir: emit the explicit ack and fall through to
+    // single-KB init (mirrors the pre-I-14 `--scan` ack message).
     opts.stdout.write(
       "No monorepo config detected (pnpm-workspace.yaml, package.json workspaces, turbo.json, Cargo.toml, go.work).\n" +
         "Falling back to single-KB init at this directory.\n\n",
     );
+    return runInitSingle(cwdAbs, opts);
   }
-  return runInitSingle(opts.cwd, opts);
+
+  // Default (no --all). Three sub-cases:
+  //
+  // 1. cwd is inside a monorepo workspace (cwd !== monorepoRoot)
+  //    → create at monorepoRoot AND at cwd, with confirm prompt.
+  // 2. cwd === monorepoRoot
+  //    → single KB at cwd (same as plain non-monorepo). No prompt; the
+  //    user has already expressed intent by running at the root.
+  // 3. monorepoRoot === null (plain non-monorepo dir)
+  //    → single KB at cwd. Existing pre-I-14 behavior preserved verbatim.
+  if (monorepoRoot !== null && monorepoRoot !== cwdAbs) {
+    const planned = [monorepoRoot, cwdAbs];
+    opts.stdout.write(`harvest init will create .harvest/ in:\n`);
+    for (const p of planned) opts.stdout.write(`  - ${p}\n`);
+    opts.stdout.write(`\n`);
+    const proceed = await confirmPlan(opts, planned);
+    if (proceed === "abort") return 0;
+    if (proceed === "no-confirm") return 2;
+    return runMultiInit(planned, monorepoRoot, opts);
+  }
+  return runInitSingle(cwdAbs, opts);
+}
+
+/**
+ * Three-way result:
+ *   - "ok"          → user confirmed (or --yes); proceed
+ *   - "abort"       → user explicitly declined; exit 0 cleanly
+ *   - "no-confirm"  → no callback supplied (e.g. non-TTY without --yes); exit 2
+ *
+ * The caller is responsible for printing the planned list before invoking
+ * this — `runInit` and `runDetectedScan` each format it differently
+ * (default flow vs. "Detected workspaces (source)" header).
+ */
+async function confirmPlan(
+  opts: InitOptions,
+  planned: string[],
+): Promise<"ok" | "abort" | "no-confirm"> {
+  if (opts.yes) return "ok";
+  if (!opts.confirm) {
+    // Don't suggest --all here: the planned list above already reflects the
+    // user's intended scope (default = cwd+root, --all = every workspace).
+    // --yes is the *only* knob that lets a non-TTY run proceed unchanged.
+    opts.stdout.write(`Re-run with --yes to confirm.\n`);
+    return "no-confirm";
+  }
+  const ok = await opts.confirm(planned);
+  if (!ok) {
+    opts.stdout.write("Aborted.\n");
+    return "abort";
+  }
+  return "ok";
+}
+
+/**
+ * Default flow for I-14: create `.harvest/` at the monorepo root and at the
+ * user's cwd. Reuses `runInitSingle` per location so each KB's INDEX gets
+ * the chain-correct `kb_path` anchored at `rootAbs`.
+ */
+async function runMultiInit(
+  paths: string[],
+  rootAbs: string,
+  opts: InitOptions,
+): Promise<number> {
+  // The planned list was already printed by `runInit` before the confirm
+  // prompt; we don't restate it here. Per-location "✓ Created" /
+  // "Already initialized" lines come from `runInitSingle`.
+  let created = 0;
+  for (const ws of paths) {
+    try {
+      const isRoot = path.resolve(ws) === rootAbs && opts.root;
+      const code = await runInitSingle(ws, { ...opts, root: isRoot }, rootAbs);
+      if (code === 0) created += 1;
+    } catch (err) {
+      process.stderr.write(`  ! init failed for ${ws}: ${errorMessage(err)}\n`);
+    }
+  }
+  opts.stdout.write(`\n✓ Created .harvest/ in ${created} locations\n`);
+  return 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -231,7 +316,16 @@ async function runDetectedScan(
   for (const p of queue) {
     opts.stdout.write(`  - ${p}\n`);
   }
-  opts.stdout.write(`\nCreating .harvest/ in each:\n`);
+  opts.stdout.write(`\n`);
+
+  // I-14: prompt before mutating anything when invoked via `--all` (or the
+  // legacy `--scan` alias). Tests inject a callback; production wires this
+  // to a TTY readline. `--yes` skips entirely.
+  const proceed = await confirmPlan(opts, queue);
+  if (proceed === "abort") return 0;
+  if (proceed === "no-confirm") return 2;
+
+  opts.stdout.write(`Creating .harvest/ in each:\n`);
 
   let created = 0;
   for (const ws of queue) {
@@ -258,8 +352,84 @@ async function runDetectedScan(
   }
 
   opts.stdout.write(`\n✓ Created .harvest/ in ${created} locations\n`);
-  opts.stdout.write(`✓ CLAUDE.md updated in each\n`);
+  // No unconditional "CLAUDE.md updated" summary — `runInitSingle` already
+  // prints a per-location status line that distinguishes created / updated /
+  // already up-to-date. A blanket summary lies on idempotent re-runs.
   return 0;
+}
+
+// -----------------------------------------------------------------------------
+// Monorepo root walk-up
+// -----------------------------------------------------------------------------
+
+/**
+ * Walk up from `cwd` and return the *topmost* ancestor with a monorepo signal
+ * (pnpm-workspace.yaml / package.json with `workspaces` / turbo.json /
+ * nx.json / Cargo.toml / go.work). Returns `null` if nothing matches.
+ *
+ * Bounds: when `cwd` is *inside* `homedir`, the walk stops at `homedir`
+ * (so an unrelated monorepo signal in `~/` or above doesn't leak in). When
+ * `cwd` is *outside* `homedir` (CI runners under `/srv`, system locations,
+ * etc.) the homedir bound doesn't apply — we walk to the filesystem root
+ * to keep auto-detection working there. Defaults to `os.homedir()`.
+ *
+ * "Topmost" rather than "closest" matches the user's "최상위 root" intent —
+ * if a project nests monorepos (e.g. a sub-directory of a pnpm monorepo also
+ * declares its own package.json `workspaces`), we treat the outer one as the
+ * KB root because that's where chain imports converge.
+ *
+ * Why a leaf `package.json` without a `workspaces` field is *not* a signal:
+ * almost every Node project ships one, so it would degenerate to "the leaf
+ * itself is the monorepo root" everywhere. We require an explicit workspaces
+ * field per the same precedence rule used by `detectWorkspaces`.
+ */
+export function findMonorepoRoot(
+  cwd: string,
+  opts?: { homedir?: string },
+): string | null {
+  const homeAbs = path.resolve(opts?.homedir ?? os.homedir());
+  let topmost: string | null = null;
+  let dir = path.resolve(cwd);
+  // Walk up from cwd. cwd itself is always inspected (even cwd === homedir).
+  // We stop *after* inspecting homedir so the loop never ascends into the
+  // parent FS — the homedir is the configured "ceiling".
+  for (;;) {
+    if (hasMonorepoSignal(dir)) topmost = dir;
+    if (dir === homeAbs) break;
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
+  return topmost;
+}
+
+function hasMonorepoSignal(dir: string): boolean {
+  if (existsSync(path.join(dir, "pnpm-workspace.yaml"))) return true;
+  if (existsSync(path.join(dir, "turbo.json"))) return true;
+  if (existsSync(path.join(dir, "nx.json"))) return true;
+  if (existsSync(path.join(dir, "Cargo.toml"))) return true;
+  if (existsSync(path.join(dir, "go.work"))) return true;
+  const pkg = path.join(dir, "package.json");
+  if (existsSync(pkg)) {
+    try {
+      const parsed = JSON.parse(readFileSync(pkg, "utf8")) as {
+        workspaces?: unknown;
+      };
+      if (
+        Array.isArray(parsed.workspaces) ||
+        (parsed.workspaces &&
+          typeof parsed.workspaces === "object" &&
+          Array.isArray(
+            (parsed.workspaces as { packages?: unknown }).packages,
+          ))
+      ) {
+        return true;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return false;
 }
 
 // -----------------------------------------------------------------------------
@@ -274,10 +444,18 @@ async function runDetectedScan(
 function detectWorkspaces(cwd: string): DetectedWorkspaces {
   const pnpm = path.join(cwd, "pnpm-workspace.yaml");
   if (existsSync(pnpm)) {
-    return {
-      source: "pnpm-workspace.yaml",
-      paths: expandWorkspaceGlobs(cwd, readPnpmWorkspaces(pnpm)),
-    };
+    // Fall through if `packages:` is absent or empty — the file is often used
+    // for `onlyBuiltDependencies` / `overrides` config alone, with the actual
+    // workspace inventory declared in package.json or nx.json. Mirrors the
+    // existing `ws.length > 0` guards on package.json/turbo.json/Cargo.toml
+    // (SPEC_DEFECTS I-14).
+    const ws = readPnpmWorkspaces(pnpm);
+    if (ws.length > 0) {
+      return {
+        source: "pnpm-workspace.yaml",
+        paths: expandWorkspaceGlobs(cwd, ws),
+      };
+    }
   }
 
   const pkg = path.join(cwd, "package.json");
@@ -301,6 +479,16 @@ function detectWorkspaces(cwd: string): DetectedWorkspaces {
 
   const nx = path.join(cwd, "nx.json");
   if (existsSync(nx)) {
+    // nx itself doesn't declare workspace paths in nx.json — the canonical
+    // marker is a per-project `project.json` file. Walk for those (depth
+    // capped at 4, build/cache dirs pruned). If none found, fall back to
+    // the I-13 manual-init hint via the empty-paths return below; callers
+    // recognize `source === "nx.json" && paths.length === 0` as the "nx
+    // detected but workspace inventory unknown" signal.
+    const projects = findNxProjectDirs(cwd);
+    if (projects.length > 0) {
+      return { source: "nx.json", paths: projects };
+    }
     return { source: "nx.json", paths: [] };
   }
 
@@ -439,6 +627,48 @@ function readGoWorkUses(filePath: string): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Walk for `project.json` files (nx's per-project marker) up to a bounded
+ * depth. Returns the absolute parent dir of each match. Build and cache
+ * directories are pruned alongside `node_modules` and dotted dirs.
+ *
+ * Depth cap of 4 covers the realistic nx layouts seen in the wild
+ * (`apps/<app>/project.json`, `apps/<app>/<sub>/project.json`,
+ * `libs/<group>/<lib>/project.json`). Going deeper hits diminishing returns
+ * and risks scanning into project source trees.
+ */
+function findNxProjectDirs(root: string): string[] {
+  const out: string[] = [];
+  const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+  while (stack.length > 0) {
+    const { dir, depth } = stack.pop()!;
+    if (depth > 0 && existsSync(path.join(dir, "project.json"))) {
+      out.push(dir);
+      // Don't descend into a project's own subtree once we've matched it —
+      // a project.json *inside* an already-claimed project dir is almost
+      // always a build artifact (nx's `dist/<project>/project.json`).
+      continue;
+    }
+    if (depth >= 4) continue;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name === "node_modules") continue;
+      if (e.name === "dist") continue;
+      if (e.name === "build") continue;
+      if (e.name === "coverage") continue;
+      if (e.name.startsWith(".")) continue;
+      stack.push({ dir: path.join(dir, e.name), depth: depth + 1 });
+    }
+  }
+  return out.sort();
 }
 
 /**
