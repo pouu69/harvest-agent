@@ -203,3 +203,39 @@ describe("createItem (path normalization)", () => {
     expect(out.paths_dropped).toEqual([outside]);
   });
 });
+
+describe("createItem (concurrency)", () => {
+  it("assigns distinct IDs when called in parallel against the same KB", async () => {
+    const kb = await makeKb(root, "proj");
+
+    const inputs = ["alpha-decision", "beta-decision", "gamma-decision"].map(
+      (slug) => ({
+        kb_path: kb,
+        item: {
+          category: "decision" as const,
+          title_slug: slug,
+          summary: `summary for ${slug}`,
+          body_markdown: VALID_BODY,
+          tags: ["test"],
+          paths: [],
+          universality: "universal" as const,
+        },
+      }),
+    );
+
+    const results = await Promise.all(
+      inputs.map((i) => createItem(i, { nowIso: () => NOW })),
+    );
+
+    for (const r of results) {
+      if ("error" in r) {
+        throw new Error(
+          `unexpected error: ${(r as CreateItemErrorOutput).error} ${(r as CreateItemErrorOutput).message}`,
+        );
+      }
+    }
+    const ids = (results as CreateItemOutput[]).map((r) => r.item_id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids.every((id) => /^D-\d{3}$/.test(id))).toBe(true);
+  });
+});
