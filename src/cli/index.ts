@@ -75,7 +75,7 @@ async function main(): Promise<number> {
       // Only attach a TTY-readline confirm when stdin is interactive. When
       // piped / scripted, runInit refuses without `--yes` and prints a
       // re-run hint so we never wedge the CLI waiting on stdin (I-14).
-      ...(process.stdin.isTTY ? { confirm: ttyConfirm } : {}),
+      confirm: process.stdin.isTTY ? ttyConfirm : undefined,
     });
   }
 
@@ -104,7 +104,7 @@ async function main(): Promise<number> {
 /**
  * Production confirm callback for `harvest init` (SPEC_DEFECTS I-14).
  * `runInit` has already printed the planned list to stdout; we just ask
- * y/N and parse the answer. `planned` is unused — the prompt is generic.
+ * y/N and parse the answer.
  */
 async function ttyConfirm(): Promise<boolean> {
   const readline = await import("node:readline/promises");

@@ -91,11 +91,7 @@ export interface InitOptions {
  * to finish the rest of the list.
  */
 export async function runInit(opts: InitOptions): Promise<number> {
-  // I-14: `--scan` is now an alias for `--all`. Both opt in to the
-  // "create at root + every detected workspace" flow; the default is
-  // narrowed to "cwd + monorepo root" so users don't accidentally
-  // explode dozens of empty KBs in large monorepos.
-  const all = (opts.all ?? false) || opts.scan;
+  const all = opts.all || opts.scan;
   const monorepoRoot = findMonorepoRoot(opts.cwd, { homedir: opts.homedir });
   const cwdAbs = path.resolve(opts.cwd);
 
@@ -184,9 +180,6 @@ async function runMultiInit(
   rootAbs: string,
   opts: InitOptions,
 ): Promise<number> {
-  // The planned list was already printed by `runInit` before the confirm
-  // prompt; we don't restate it here. Per-location "✓ Created" /
-  // "Already initialized" lines come from `runInitSingle`.
   let created = 0;
   for (const ws of paths) {
     try {
@@ -338,9 +331,6 @@ async function runDetectedScan(
       // INDEX frontmatter shows e.g. `apps/web/.harvest` per §7.3 instead
       // of every workspace's INDEX claiming `.harvest`.
       const code = await runInitSingle(ws, { ...opts, root: isRoot }, rootAbs);
-      // `runInitSingle` currently never returns non-zero, but if a future
-      // code path ever does we want the count to reflect actual successes
-      // rather than silently overstating.
       if (code === 0) created += 1;
     } catch (err) {
       // Per spec — log and continue. Don't fail the whole scan if one
@@ -352,9 +342,6 @@ async function runDetectedScan(
   }
 
   opts.stdout.write(`\n✓ Created .harvest/ in ${created} locations\n`);
-  // No unconditional "CLAUDE.md updated" summary — `runInitSingle` already
-  // prints a per-location status line that distinguishes created / updated /
-  // already up-to-date. A blanket summary lies on idempotent re-runs.
   return 0;
 }
 
@@ -409,26 +396,10 @@ function hasMonorepoSignal(dir: string): boolean {
   if (existsSync(path.join(dir, "nx.json"))) return true;
   if (existsSync(path.join(dir, "Cargo.toml"))) return true;
   if (existsSync(path.join(dir, "go.work"))) return true;
+  // package.json without a `workspaces` field is not a signal — almost every
+  // Node project ships one. Defer to the same parser detectWorkspaces uses.
   const pkg = path.join(dir, "package.json");
-  if (existsSync(pkg)) {
-    try {
-      const parsed = JSON.parse(readFileSync(pkg, "utf8")) as {
-        workspaces?: unknown;
-      };
-      if (
-        Array.isArray(parsed.workspaces) ||
-        (parsed.workspaces &&
-          typeof parsed.workspaces === "object" &&
-          Array.isArray(
-            (parsed.workspaces as { packages?: unknown }).packages,
-          ))
-      ) {
-        return true;
-      }
-    } catch {
-      /* fall through */
-    }
-  }
+  if (existsSync(pkg) && readPackageJsonWorkspaces(pkg).length > 0) return true;
   return false;
 }
 
@@ -660,16 +631,30 @@ function findNxProjectDirs(root: string): string[] {
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
-      if (e.name === "node_modules") continue;
-      if (e.name === "dist") continue;
-      if (e.name === "build") continue;
-      if (e.name === "coverage") continue;
+      if (PRUNE_DIRS.has(e.name)) continue;
       if (e.name.startsWith(".")) continue;
       stack.push({ dir: path.join(dir, e.name), depth: depth + 1 });
     }
   }
   return out.sort();
 }
+
+/**
+ * Directory names skipped by both `findNxProjectDirs` and `walkDirs`.
+ * `node_modules` is the universal must-prune; the rest are common build /
+ * cache / vendor outputs that bloat scan time without ever containing real
+ * workspaces. Dotted dirs are pruned separately by a `startsWith(".")` check.
+ */
+const PRUNE_DIRS = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "out",
+  "target",
+  "coverage",
+  "vendor",
+  "tmp",
+]);
 
 /**
  * Expand a list of workspace patterns (literal paths or globs) into actual
@@ -706,9 +691,9 @@ function hasGlobMagic(s: string): boolean {
 }
 
 /**
- * Yields directories under `root` up to `maxDepth`. `node_modules` and
- * dotted dirs (`.git`, `.harvest`, `.foo`) are pruned to avoid blowing up
- * on large monorepos.
+ * Yields directories under `root` up to `maxDepth`. Build/cache dirs in
+ * `PRUNE_DIRS` and dotted dirs (`.git`, `.harvest`, `.foo`) are pruned to
+ * avoid blowing up on large monorepos.
  */
 function walkDirs(root: string, maxDepth: number): string[] {
   const out: string[] = [];
@@ -726,7 +711,7 @@ function walkDirs(root: string, maxDepth: number): string[] {
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
-      if (e.name === "node_modules") continue;
+      if (PRUNE_DIRS.has(e.name)) continue;
       if (e.name.startsWith(".")) continue;
       const child = path.join(dir, e.name);
       out.push(child);
