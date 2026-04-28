@@ -43,6 +43,7 @@ import {
   posixRelative,
   rollbackPromote,
   schemaViolation,
+  withKbWriteLock,
 } from "./_internal.js";
 
 // -----------------------------------------------------------------------------
@@ -184,10 +185,15 @@ export async function promoteItem(
   const findChain = deps.findKbChainFn ?? findKbChain;
   const nowIso = deps.nowIso ?? defaultNowIso;
 
-  if (data.direction === "promote") {
-    return handlePromote(data, findChain, nowIso);
-  }
-  return handleDemote(data, findChain, nowIso);
+  // Concurrency: lock on the target_kb — the KB that allocates the new id.
+  // Origin patches happen after id allocation and don't need their own lock
+  // because the id race is bounded by the target_kb mutex.
+  return withKbWriteLock(data.target_kb, () => {
+    if (data.direction === "promote") {
+      return handlePromote(data, findChain, nowIso);
+    }
+    return handleDemote(data, findChain, nowIso);
+  });
 }
 
 // -----------------------------------------------------------------------------

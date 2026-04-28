@@ -42,6 +42,7 @@ import {
   type ErrorEnvelope,
   findItemById,
   schemaViolation,
+  withKbWriteLock,
 } from "./_internal.js";
 
 // -----------------------------------------------------------------------------
@@ -93,16 +94,24 @@ export interface UpdateItemDeps {
 // Handler
 // -----------------------------------------------------------------------------
 
+// Concurrency: writes are serialized per-KB by withKbWriteLock — see _internal.ts.
 export async function updateItem(
   input: unknown,
   deps: UpdateItemDeps = {},
 ): Promise<UpdateItemOutput | UpdateItemErrorOutput> {
-  // 1. Zod validation
+  // 1. Zod validation (outside the lock).
   const parsed = updateItemInputSchema.safeParse(input);
   if (!parsed.success) {
     return schemaViolation("update_item", parsed.error.issues);
   }
   const data = parsed.data;
+  return withKbWriteLock(data.kb_path, () => updateItemLocked(data, deps));
+}
+
+async function updateItemLocked(
+  data: UpdateItemInput,
+  deps: UpdateItemDeps,
+): Promise<UpdateItemOutput | UpdateItemErrorOutput> {
   const patch = data.frontmatter_patch;
 
   // 2. Locate target

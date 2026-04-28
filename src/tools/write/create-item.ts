@@ -57,6 +57,7 @@ import {
   type ErrorEnvelope,
   hasDuplicateSlug,
   schemaViolation,
+  withKbWriteLock,
 } from "./_internal.js";
 
 // -----------------------------------------------------------------------------
@@ -145,16 +146,26 @@ export interface CreateItemDeps {
 // Handler
 // -----------------------------------------------------------------------------
 
+// Concurrency: writes are serialized per-KB by withKbWriteLock — see _internal.ts.
+// The schema parse runs outside the lock (cheap, no IO) so malformed input
+// does not queue behind a long-running write.
 export async function createItem(
   input: unknown,
   deps: CreateItemDeps = {},
 ): Promise<CreateItemOutput | CreateItemErrorOutput> {
-  // 1. Zod validation
+  // 1. Zod validation (outside the lock).
   const parsed = createItemInputSchema.safeParse(input);
   if (!parsed.success) {
     return schemaViolation("create_item", parsed.error.issues);
   }
   const data = parsed.data;
+  return withKbWriteLock(data.kb_path, () => createItemLocked(data, deps));
+}
+
+async function createItemLocked(
+  data: CreateItemInput,
+  deps: CreateItemDeps,
+): Promise<CreateItemOutput | CreateItemErrorOutput> {
   const item = data.item;
 
   // 2. severity is anti-pattern only — already enforced at the schema

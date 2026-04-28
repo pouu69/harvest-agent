@@ -34,6 +34,7 @@ import {
   type ErrorEnvelope,
   findItemById,
   schemaViolation,
+  withKbWriteLock,
 } from "./_internal.js";
 
 // -----------------------------------------------------------------------------
@@ -69,11 +70,13 @@ export interface ArchiveItemDeps {
 // Handler
 // -----------------------------------------------------------------------------
 
+// Concurrency: writes are serialized per-KB by withKbWriteLock — see _internal.ts.
 export async function archiveItem(
   input: unknown,
   deps: ArchiveItemDeps = {},
 ): Promise<ArchiveItemOutput | ArchiveItemErrorOutput> {
-  // 1. Zod validation. Surface `reason_too_short` if that's the only failure.
+  // 1. Zod validation (outside the lock). Surface `reason_too_short` if
+  //    that's the only failure.
   const parsed = archiveItemInputSchema.safeParse(input);
   if (!parsed.success) {
     const issues = parsed.error.issues;
@@ -91,6 +94,13 @@ export async function archiveItem(
     return schemaViolation("archive_item", issues);
   }
   const data = parsed.data;
+  return withKbWriteLock(data.kb_path, () => archiveItemLocked(data, deps));
+}
+
+async function archiveItemLocked(
+  data: ArchiveItemInput,
+  deps: ArchiveItemDeps,
+): Promise<ArchiveItemOutput | ArchiveItemErrorOutput> {
 
   // 2. Locate
   const found = await findItemById(data.kb_path, data.item_id);

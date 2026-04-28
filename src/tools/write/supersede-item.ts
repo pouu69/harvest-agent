@@ -45,6 +45,7 @@ import {
   findItemById,
   insertHistoryEntry,
   schemaViolation,
+  withKbWriteLock,
 } from "./_internal.js";
 
 // -----------------------------------------------------------------------------
@@ -96,13 +97,14 @@ export interface SupersedeItemDeps {
 // Handler
 // -----------------------------------------------------------------------------
 
+// Concurrency: writes are serialized per-KB by withKbWriteLock — see _internal.ts.
 export async function supersedeItem(
   input: unknown,
   deps: SupersedeItemDeps = {},
 ): Promise<SupersedeItemOutput | SupersedeItemErrorOutput> {
-  // 1. Zod validation. We also surface `history_note_too_short` explicitly
-  //    when *only* that field is the issue, so callers can branch on the
-  //    specific error code listed in §9.5.
+  // 1. Zod validation (outside the lock). We also surface
+  //    `history_note_too_short` explicitly when *only* that field is the
+  //    issue, so callers can branch on the specific error code listed in §9.5.
   const parsed = supersedeItemInputSchema.safeParse(input);
   if (!parsed.success) {
     const issues = parsed.error.issues;
@@ -122,6 +124,13 @@ export async function supersedeItem(
     return schemaViolation("supersede_item", issues);
   }
   const data = parsed.data;
+  return withKbWriteLock(data.kb_path, () => supersedeItemLocked(data, deps));
+}
+
+async function supersedeItemLocked(
+  data: SupersedeItemInput,
+  deps: SupersedeItemDeps,
+): Promise<SupersedeItemOutput | SupersedeItemErrorOutput> {
   const patch = data.frontmatter_patch;
 
   // 2. Locate
