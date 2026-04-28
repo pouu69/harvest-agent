@@ -38,15 +38,35 @@ import { join } from "node:path";
 import { atomicWrite } from "../core/atomic-write.js";
 
 /**
- * Template written to `~/.harvest/config.json` on first run. Keys map
- * 1:1 to the environment variables read by the rest of the CLI; values
- * are empty strings, signalling "not configured" (and thus skipped at
- * apply time so empty values don't shadow defaults).
+ * Template written to `~/.harvest/config.json` on first run. The string
+ * keys map 1:1 to environment variables read by the rest of the CLI;
+ * values are empty strings, signalling "not configured" (and thus skipped
+ * at apply time so empty values don't shadow defaults).
+ *
+ * The leading `_README` field is a string-array of inline help — JSON
+ * itself has no comments, so we use a non-string value at the top of the
+ * file to give the user immediate guidance when they open it. The loader
+ * (`loadAndApplyUserConfig`) skips any non-string value, so `_README`
+ * (and any other `_`-prefixed metadata users add) is silently ignored.
  *
  * Dev-only knobs (`HARVEST_TEST_LLM`, `HARVEST_DEBUG`) are intentionally
  * omitted — those belong in shell env, not user config.
  */
-export const USER_CONFIG_TEMPLATE: Record<string, string> = {
+export const USER_CONFIG_TEMPLATE: Record<string, string | string[]> = {
+  _README: [
+    "Edit this file to configure harvest. Empty value = unset (use defaults).",
+    "Non-empty values overwrite process.env on every run; this file is the",
+    "single authoritative source — there is no fallback to project .env files.",
+    "",
+    "HARVEST_PROVIDER             : anthropic | openai | google",
+    "ANTHROPIC_API_KEY            : https://console.anthropic.com/",
+    "OPENAI_API_KEY               : https://platform.openai.com/api-keys",
+    "GOOGLE_GENERATIVE_AI_API_KEY : https://aistudio.google.com/app/apikey",
+    "HARVEST_MODEL                : override default model (provider-specific id)",
+    "HARVEST_EXTRACT_MODEL        : override EXTRACT-step model (defaults to HARVEST_MODEL)",
+    "HARVEST_GATEWAY_URL          : corporate / on-prem gateway endpoint",
+    "HARVEST_TRANSCRIPT_DIR       : transcript search path (default ~/.claude/projects)",
+  ],
   HARVEST_PROVIDER: "",
   HARVEST_MODEL: "",
   HARVEST_EXTRACT_MODEL: "",
