@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Harvest — A CLI that distills Claude Code sessions</title>
+<meta name="description" content="Harvest distills Claude Code session transcripts into a per-project, plain-Markdown knowledge base. A pitch deck." />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+
+<!-- mono primary (JetBrains Mono — full weight range) -->
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400;1,500&display=swap" rel="stylesheet" />
+<!-- Korean monospace — D2Coding (Naver), classic terminal feel for Hangul -->
+<link href="https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_two@1.2/D2Coding.css" rel="stylesheet" />
+<!-- Korean sans fallback (kicks in only when D2 missing) -->
+<link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.css" />
+
+<link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%231E1E2E'/><text x='8' y='22' font-family='ui-monospace,monospace' font-size='18' font-weight='700' fill='%23A6E3A1'>%26gt;</text><rect x='22' y='10' width='6' height='14' fill='%23FAB387'/></svg>" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- registration marks (printer-style corner crosses) -->
+<span class="mark mark--tl" aria-hidden="true">+</span>
+<span class="mark mark--tr" aria-hidden="true">+</span>
+<span class="mark mark--bl" aria-hidden="true">+</span>
+<span class="mark mark--br" aria-hidden="true">+</span>
+
+<!-- top-right slide chrome -->
+<div class="chrome" aria-live="polite" aria-atomic="true">
+  <span class="chrome__num">01</span>
+  <span class="chrome__sep">⁄</span>
+  <span class="chrome__total">12</span>
+  <span class="chrome__dash">—</span>
+  <span class="chrome__name">COVER</span>
+</div>
+
+<!-- bottom-left brand chrome -->
+<div class="brandmark" aria-hidden="true">
+  <span class="brandmark__h">harvest</span><span class="brandmark__dot">·</span><span class="brandmark__h">cli</span>
+  <span class="brandmark__sub">v0.1.0 / pre-release</span>
+</div>
+
+<!-- bottom-right nav -->
+<nav class="nav" aria-label="슬라이드 이동">
+  <button type="button" class="nav__btn" data-nav="prev" aria-label="이전 슬라이드">
+    <span class="nav__arrow" aria-hidden="true">←</span><span class="nav__lbl">PREV</span>
+  </button>
+  <button type="button" class="nav__btn" data-nav="next" aria-label="다음 슬라이드">
+    <span class="nav__lbl">NEXT</span><span class="nav__arrow" aria-hidden="true">→</span>
+  </button>
+</nav>
+
+<!-- progress hairline -->
+<div class="progress" aria-hidden="true"><span class="progress__fill"></span></div>
+
+<main class="deck" id="deck">
+
+  <!-- 01 COVER -->
+  <section class="slide slide--cover" data-slide="01" data-name="COVER" role="group" aria-roledescription="slide" aria-label="1 of 12 — Cover">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="cover-eyebrow stagger" data-stagger="0">
+        <span class="dot" aria-hidden="true">◆</span> A FIELD MANUAL · 2026 · APRIL
+      </div>
+      <h1 class="cover-title stagger" data-stagger="1">Harvest<span class="cover-title__amp" aria-hidden="true">,</span></h1>
+      <p class="cover-deck stagger" data-stagger="2">
+        Claude&nbsp;Code 세션의 휘발성 지식을<br/>
+        영속 KB&nbsp;로 수확하는 CLI.
+      </p>
+      <div class="cover-meta stagger" data-stagger="3">
+        <span class="cover-meta__row"><span class="k">SOURCE</span> <span class="v">~/.claude/projects/&lt;slug&gt;/*.jsonl</span></span>
+        <span class="cover-meta__row"><span class="k">SINK</span> <span class="v">.harvest/{decisions,learnings,reusable,anti-patterns}/*.md</span></span>
+        <span class="cover-meta__row"><span class="k">SHAPE</span> <span class="v">monorepo-aware · markdown-native · git-friendly</span></span>
+      </div>
+      <div class="cover-foot stagger" data-stagger="4">
+        <span class="cover-foot__l">박관웅 · LINE Plus · kwanung.park@linecorp.com</span>
+        <span class="cover-foot__r">press <kbd>→</kbd> &nbsp;or&nbsp; <kbd>SPACE</kbd></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 PROBLEM -->
+  <section class="slide" data-slide="02" data-name="THE PROBLEM" role="group" aria-roledescription="slide" aria-label="2 of 12 — The Problem">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 01 / THE PROBLEM</div>
+      <h2 class="slide__title stagger" data-stagger="1">
+        <em>매번</em> 휘발된다.
+      </h2>
+      <p class="slide__lede stagger" data-stagger="2">
+        Claude Code 세션 한 번에 만들어진 가치 있는 지식이,<br/>
+        다음 세션으로 단 한 줄도 넘어가지 않는다.
+      </p>
+      <ul class="losslist stagger" data-stagger="3">
+        <li class="losslist__item">
+          <span class="losslist__tag">D</span>
+          <span class="losslist__name">Decisions</span>
+          <span class="losslist__desc">왜 이 라이브러리를 골랐는가, 왜 이 아키텍처인가</span>
+        </li>
+        <li class="losslist__item">
+          <span class="losslist__tag">L</span>
+          <span class="losslist__name">Learnings</span>
+          <span class="losslist__desc">새로 알게 된 패턴 · 트릭 · 도구 사용법</span>
+        </li>
+        <li class="losslist__item">
+          <span class="losslist__tag">R</span>
+          <span class="losslist__name">Reusable</span>
+          <span class="losslist__desc">다른 곳에서도 쓸 만한 스니펫과 접근법</span>
+        </li>
+        <li class="losslist__item losslist__item--accent">
+          <span class="losslist__tag">A</span>
+          <span class="losslist__name">Anti-patterns</span>
+          <span class="losslist__desc">시행착오로 알게 된 함정 — 가장 비싼 손실</span>
+        </li>
+      </ul>
+      <p class="slide__caption stagger" data-stagger="4">
+        결과 → 같은 실수 반복, 이미 내린 결정의 재논의.
+      </p>
+    </div>
+  </section>
+
+  <!-- 03 SOLUTION -->
+  <section class="slide" data-slide="03" data-name="THE SOLUTION" role="group" aria-roledescription="slide" aria-label="3 of 12 — The Solution">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 02 / THE SOLUTION</div>
+      <h2 class="slide__title stagger" data-stagger="1">두 개의 명령. 그리고 마크다운.</h2>
+
+      <div class="flow stagger" data-stagger="2">
+        <div class="flow__cell">
+          <div class="flow__num">i.</div>
+          <code class="flow__cmd">$ harvest init</code>
+          <p class="flow__desc">프로젝트에 <span class="mono">.harvest/</span> 폴더(=KB) 생성<br/>+ <span class="mono">CLAUDE.md</span> 마커 블록에 <span class="mono">@</span>-import 한 줄</p>
+        </div>
+        <div class="flow__arrow" aria-hidden="true">
+          <span>──</span><span class="flow__arrowhead">▶</span>
+        </div>
+        <div class="flow__cell flow__cell--mid">
+          <div class="flow__num">ii.</div>
+          <code class="flow__cmd">며칠간 Claude Code 사용</code>
+          <p class="flow__desc">평소대로 작업하면 <span class="mono">~/.claude/projects/</span> 아래에 transcript가 쌓인다.</p>
+        </div>
+        <div class="flow__arrow" aria-hidden="true">
+          <span>──</span><span class="flow__arrowhead">▶</span>
+        </div>
+        <div class="flow__cell">
+          <div class="flow__num">iii.</div>
+          <code class="flow__cmd">$ harvest start</code>
+          <p class="flow__desc">미처리 transcript를 분석. Agent가 항목을<br/><span class="op op--c">create</span> · <span class="op">merge</span> · <span class="op">supersede</span> · <span class="op">archive</span>.</p>
+        </div>
+      </div>
+
+      <div class="terminal stagger" data-stagger="3" aria-hidden="false">
+        <div class="terminal__bar">
+          <span></span><span></span><span></span>
+          <span class="terminal__title">~/projects/my-blog</span>
+        </div>
+        <pre class="terminal__body"><span class="t-prompt">$</span> <span class="t-cmd">harvest start</span>
+<span class="t-ok">✓</span> 7 sessions <span class="t-arrow">→</span> 3 processed, 4 trivial-skipped
+   <span class="t-key">Created:</span>  D-012 (auth-jwt-strategy)
+             A-001 (jwt-refresh-loop)
+   <span class="t-key">Merged:</span>   L-005
+   <span class="t-key">Cost:</span>     $0.62  ·  4m 18s</pre>
+      </div>
+
+      <p class="slide__caption stagger" data-stagger="4">
+        다음 Claude Code 세션은 INDEX&nbsp;를 자동 로드 → 같은 함정을 두 번 밟지 않는다.
+      </p>
+    </div>
+  </section>
+
+  <!-- 04 FOUR CATEGORIES -->
+  <section class="slide" data-slide="04" data-name="FOUR CATEGORIES" role="group" aria-roledescription="slide" aria-label="4 of 12 — The Four Categories">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 03 / TAXONOMY</div>
+      <h2 class="slide__title stagger" data-stagger="1">
+        네 개의 카테고리. <em>고정.</em>
+      </h2>
+      <p class="slide__lede stagger" data-stagger="2">
+        자유 폼 태그가 아니라 <em>의견이 있는 라우팅</em>.<br/>
+        각 항목은 정확히 하나의 폴더에 들어간다.
+      </p>
+
+      <div class="cat-grid stagger" data-stagger="3">
+        <article class="cat">
+          <header class="cat__head"><span class="cat__tag">D</span><span class="cat__name">Decisions</span></header>
+          <p class="cat__desc">선택의 <em>왜</em>. 라이브러리, 아키텍처, 트레이드오프의 근거.</p>
+          <code class="cat__path">.harvest/decisions/D-XXX-*.md</code>
+        </article>
+        <article class="cat">
+          <header class="cat__head"><span class="cat__tag">L</span><span class="cat__name">Learnings</span></header>
+          <p class="cat__desc">새로 발견한 도구, 패턴, 동작 — 다음 번에 빠르게 도달하기 위해.</p>
+          <code class="cat__path">.harvest/learnings/L-XXX-*.md</code>
+        </article>
+        <article class="cat">
+          <header class="cat__head"><span class="cat__tag">R</span><span class="cat__name">Reusable</span></header>
+          <p class="cat__desc">다른 자리에 그대로 옮길 수 있는 스니펫과 접근법.</p>
+          <code class="cat__path">.harvest/reusable/R-XXX-*.md</code>
+        </article>
+        <article class="cat cat--accent">
+          <header class="cat__head"><span class="cat__tag">A</span><span class="cat__name">Anti-patterns</span><span class="cat__crit">CRITICAL</span></header>
+          <p class="cat__desc">반복하면 안 되는 함정. <em>severity:critical</em>은 INDEX 최상단에 항상 노출 — 다음 세션이 즉시 본다.</p>
+          <code class="cat__path">.harvest/anti-patterns/A-XXX-*.md</code>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- 05 PUSH NOT PULL -->
+  <section class="slide" data-slide="05" data-name="PUSH NOT PULL" role="group" aria-roledescription="slide" aria-label="5 of 12 — Push, not Pull">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 04 / DIFFERENTIATOR I</div>
+      <h2 class="slide__title stagger" data-stagger="1">
+        <em>Push,</em> not Pull.
+      </h2>
+
+      <div class="vs stagger" data-stagger="2">
+        <div class="vs__col vs__col--a">
+          <div class="vs__label">RAG · LLM-WIKI</div>
+          <div class="vs__body">
+            <div class="vs__icon vs__icon--q" aria-hidden="true">
+              <svg viewBox="0 0 120 120" width="120" height="120">
+                <circle cx="60" cy="60" r="46" fill="none" stroke="currentColor" stroke-width="1"/>
+                <text x="60" y="80" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="64" font-style="italic" fill="currentColor">?</text>
+              </svg>
+            </div>
+            <p class="vs__quote">사용자가 묻는다.<br/>그제서야 검색이 일어나고,<br/>그제서야 답이 만들어진다.</p>
+            <p class="vs__caption">PULL · on-demand · query-shaped</p>
+          </div>
+        </div>
+        <div class="vs__divider" aria-hidden="true">
+          <span>vs</span>
+        </div>
+        <div class="vs__col vs__col--b">
+          <div class="vs__label">HARVEST</div>
+          <div class="vs__body">
+            <div class="vs__icon vs__icon--a" aria-hidden="true">
+              <svg viewBox="0 0 120 120" width="120" height="120">
+                <rect x="14" y="14" width="92" height="92" fill="none" stroke="currentColor" stroke-width="1"/>
+                <line x1="14" y1="32" x2="106" y2="32" stroke="currentColor" stroke-width="1"/>
+                <line x1="22" y1="46" x2="84" y2="46" stroke="currentColor" stroke-width="0.7"/>
+                <line x1="22" y1="58" x2="92" y2="58" stroke="currentColor" stroke-width="0.7"/>
+                <line x1="22" y1="70" x2="76" y2="70" stroke="currentColor" stroke-width="0.7"/>
+                <line x1="22" y1="82" x2="88" y2="82" stroke="currentColor" stroke-width="0.7"/>
+                <line x1="22" y1="94" x2="68" y2="94" stroke="currentColor" stroke-width="0.7"/>
+                <text x="22" y="26" font-family="JetBrains Mono, monospace" font-size="9" fill="currentColor">INDEX.md</text>
+              </svg>
+            </div>
+            <p class="vs__quote">세션이 시작되는 <em>그 순간</em>,<br/>INDEX가 컨텍스트에 이미 들어가 있다.<br/><span class="mono">CLAUDE.md @-import</span> 한 줄.</p>
+            <p class="vs__caption">PUSH · ambient · index-shaped</p>
+          </div>
+        </div>
+      </div>
+
+      <p class="slide__caption stagger" data-stagger="4">
+        Claude는 <em>묻지 않아도 알고</em> 시작한다. 검색 단계가 통째로 사라진다.
+      </p>
+    </div>
+  </section>
+
+  <!-- 06 CONCENTRATION -->
+  <section class="slide" data-slide="06" data-name="CONCENTRATION" role="group" aria-roledescription="slide" aria-label="6 of 12 — Concentration">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 05 / DIFFERENTIATOR II</div>
+      <h2 class="slide__title stagger" data-stagger="1">
+        <em>Concentration,</em> not Storage.
+      </h2>
+
+      <div class="caps stagger" data-stagger="2">
+        <div class="cap">
+          <div class="cap__num" data-count="10">10</div>
+          <div class="cap__lbl">per category</div>
+          <div class="cap__sub">decisions ≤ 10 · learnings ≤ 10 ·<br/>reusable ≤ 10 · anti-patterns ≤ 10</div>
+        </div>
+        <div class="cap__sep" aria-hidden="true">×</div>
+        <div class="cap">
+          <div class="cap__num" data-count="40">40</div>
+          <div class="cap__lbl">per KB</div>
+          <div class="cap__sub">한 지식 베이스의 총 항목 수.<br/>넘치면 자율 정리가 작동.</div>
+        </div>
+      </div>
+
+      <div class="ops stagger" data-stagger="3">
+        <p class="ops__lede">신규 작성은 <em>마지막 수단</em>. 우선순위는:</p>
+        <ol class="ops__list">
+          <li><span class="ops__num">01</span><span class="ops__name">merge</span><span class="ops__desc">기존 항목과 병합 — 중복 제거 + 사례 누적</span></li>
+          <li><span class="ops__num">02</span><span class="ops__name">supersede</span><span class="ops__desc">새 결정이 옛 결정을 대체 — History 보존</span></li>
+          <li><span class="ops__num">03</span><span class="ops__name">archive</span><span class="ops__desc">관련성을 잃은 항목을 인덱스에서 내림</span></li>
+          <li><span class="ops__num">04</span><span class="ops__name">create</span><span class="ops__desc">위 셋이 모두 적합하지 않을 때만</span></li>
+        </ol>
+      </div>
+
+      <p class="slide__caption stagger" data-stagger="4">
+        노이즈가 시그널을 죽이지 않도록, 의도적으로 <em>작게</em> 유지한다.
+      </p>
+    </div>
+  </section>
+
+  <!-- 07 COMPARISON TABLE -->
+  <section class="slide slide--dense" data-slide="07" data-name="VS RAG WIKI" role="group" aria-roledescription="slide" aria-label="7 of 12 — vs RAG / LLM-Wiki">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 06 / POSITION</div>
+      <h2 class="slide__title slide__title--sm stagger" data-stagger="1">
+        같은 가족 안에서, 다른 디자인 선택.
+      </h2>
+
+      <table class="cmp stagger" data-stagger="2">
+        <thead>
+          <tr>
+            <th scope="col" class="cmp__axis">축</th>
+            <th scope="col">일반 LLM-wiki / RAG</th>
+            <th scope="col" class="cmp__us">Harvest</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">소스</th><td>사용자가 직접 작성한 노트</td><td><em>Claude Code transcript</em> — 저작 부담 0</td></tr>
+          <tr><th scope="row">수집</th><td>적을 때 (수동)</td><td><span class="mono">harvest start</span> 한 번 — 일괄 수확</td></tr>
+          <tr><th scope="row">분류</th><td>자유 태그</td><td>4 카테고리 고정</td></tr>
+          <tr><th scope="row">성장</th><td>monotonic — 적을수록 커짐</td><td>concentration — merge·supersede·archive 우선</td></tr>
+          <tr><th scope="row">검색</th><td>임베딩 / 벡터 (RAG)</td><td><em>검색 없음</em> — INDEX가 자동 주입</td></tr>
+          <tr><th scope="row">LLM 위치</th><td>모든 retrieval / 생성</td><td>좁은 출구 두 곳 (extract + tie-break)</td></tr>
+          <tr><th scope="row">저장</th><td>DB / 벡터 인덱스 / 클라우드</td><td>평문 마크다운 + git</td></tr>
+          <tr><th scope="row">주입</th><td>사용자가 명시적으로 검색</td><td><span class="mono">@</span>-import 으로 다음 세션에 자동</td></tr>
+          <tr><th scope="row">스코프</th><td>글로벌 / 사용자별</td><td>프로젝트별 + 모노레포 KB chain</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 08 DETERMINISM BOUNDARY -->
+  <section class="slide" data-slide="08" data-name="DETERMINISM" role="group" aria-roledescription="slide" aria-label="8 of 12 — Determinism Boundary">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 07 / ARCHITECTURE</div>
+      <h2 class="slide__title stagger" data-stagger="1">LLM은 <em>좁은 출구</em> 두 곳에서만.</h2>
+      <p class="slide__lede stagger" data-stagger="2">
+        라우팅 · 머지 · INDEX 빌드는 모두 결정론 코드. 같은 입력 → 같은 결과.
+      </p>
+
+      <div class="pipeline stagger" data-stagger="3" role="img"
+           aria-label="결정론 파이프라인 — TRANSCRIPT → PREFILTER → EXTRACT(LLM) → ROUTE → TIE-BREAK(LLM) → WRITE">
+        <div class="pipe">
+          <div class="pipe__stage">
+            <div class="pipe__top">&nbsp;</div>
+            <div class="pipe__box">
+              <div class="pipe__cap">TRANSCRIPT</div>
+              <div class="pipe__sub">~/.claude/projects</div>
+            </div>
+            <div class="pipe__bot">trivial-skip</div>
+          </div>
+          <span class="pipe__sep" aria-hidden="true">─▶</span>
+          <div class="pipe__stage">
+            <div class="pipe__top">&nbsp;</div>
+            <div class="pipe__box">
+              <div class="pipe__cap">PREFILTER</div>
+              <div class="pipe__sub pipe__sub--it">deterministic</div>
+            </div>
+            <div class="pipe__bot">&nbsp;</div>
+          </div>
+          <span class="pipe__sep" aria-hidden="true">─▶</span>
+          <div class="pipe__stage">
+            <div class="pipe__top pipe__top--mark">↑ ONLY HERE</div>
+            <div class="pipe__box pipe__box--llm">
+              <div class="pipe__cap pipe__cap--llm">▼ LLM EXIT</div>
+              <div class="pipe__name">extract</div>
+              <div class="pipe__sub pipe__sub--llm">items_from_transcript</div>
+            </div>
+            <div class="pipe__bot">&nbsp;</div>
+          </div>
+          <span class="pipe__sep" aria-hidden="true">─▶</span>
+          <div class="pipe__stage">
+            <div class="pipe__top">&nbsp;</div>
+            <div class="pipe__box">
+              <div class="pipe__cap">ROUTE</div>
+              <div class="pipe__sub pipe__sub--it">deterministic</div>
+            </div>
+            <div class="pipe__bot">category + ID</div>
+          </div>
+          <span class="pipe__sep" aria-hidden="true">─▶</span>
+          <div class="pipe__stage">
+            <div class="pipe__top pipe__top--mark">↑ ONLY HERE</div>
+            <div class="pipe__box pipe__box--llm">
+              <div class="pipe__cap pipe__cap--llm">▼ LLM EXIT</div>
+              <div class="pipe__name">tie-break</div>
+              <div class="pipe__sub pipe__sub--llm">on similarity ≥ θ</div>
+            </div>
+            <div class="pipe__bot">&nbsp;</div>
+          </div>
+          <span class="pipe__sep" aria-hidden="true">─▶</span>
+          <div class="pipe__stage">
+            <div class="pipe__top">&nbsp;</div>
+            <div class="pipe__box">
+              <div class="pipe__cap">WRITE</div>
+              <div class="pipe__sub pipe__sub--it">atomic</div>
+            </div>
+            <div class="pipe__bot">temp + rename</div>
+          </div>
+        </div>
+      </div>
+
+      <p class="slide__caption stagger" data-stagger="4">
+        결정론 prefilter → 좁은 LLM 출구 → 결정론 라우팅 → atomic write. <em>도구 게이트로 잠긴 모양.</em>
+      </p>
+    </div>
+  </section>
+
+  <!-- 09 SAFETY -->
+  <section class="slide" data-slide="09" data-name="SAFE BY CONSTRUCTION" role="group" aria-roledescription="slide" aria-label="9 of 12 — Safe By Construction">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 08 / INVARIANTS</div>
+      <h2 class="slide__title stagger" data-stagger="1">중단해도, 두 번 돌려도, 안전하다.</h2>
+
+      <div class="invariants stagger" data-stagger="2">
+        <div class="inv">
+          <div class="inv__rune">⊕</div>
+          <h3 class="inv__name">Idempotent</h3>
+          <p class="inv__desc"><span class="mono">processed.json</span> ledger가 <span class="mono">(session_id, sha256)</span>를 키로 중복 처리를 차단. <em>두 번 돌려도 같은 결과.</em></p>
+        </div>
+        <div class="inv">
+          <div class="inv__rune">⌬</div>
+          <h3 class="inv__name">Atomic write</h3>
+          <p class="inv__desc">모든 KB 파일 쓰기는 <span class="mono">temp + rename</span>. 부분 실패가 KB를 깨뜨릴 수 없음.</p>
+        </div>
+        <div class="inv">
+          <div class="inv__rune">▣</div>
+          <h3 class="inv__name">KB-단위 lock</h3>
+          <p class="inv__desc">체인의 <em>모든</em> KB lock을 all-or-nothing으로 획득. 충돌 시 즉시 <span class="mono">exit 4</span>.</p>
+        </div>
+        <div class="inv">
+          <div class="inv__rune">↺</div>
+          <h3 class="inv__name">2-stage SIGINT</h3>
+          <p class="inv__desc">1차 Ctrl+C → AI SDK 호출 cooperative abort + INDEX 재빌드 + lock 해제 → <span class="mono">exit 130</span>. 2차 → sync cleanup.</p>
+        </div>
+      </div>
+
+      <p class="slide__caption stagger" data-stagger="4">
+        <em>네 invariants 모두 코드의 계약</em> — 새 코드는 이걸 깨면 lint/typecheck 단계에서 막힌다.
+      </p>
+    </div>
+  </section>
+
+  <!-- 10 MULTI-PROVIDER -->
+  <section class="slide" data-slide="10" data-name="MULTI-PROVIDER" role="group" aria-roledescription="slide" aria-label="10 of 12 — Multi-provider">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 09 / PROVIDERS</div>
+      <h2 class="slide__title stagger" data-stagger="1">하나의 인터페이스, 세 개의 백엔드.</h2>
+      <p class="slide__lede stagger" data-stagger="2">
+        <span class="mono">--provider</span> 플래그 또는 <span class="mono">HARVEST_PROVIDER</span> 환경변수로 전환.<br/>
+        API key는 <em>오직 환경변수</em>로만 — argv에 노출되지 않는다.
+      </p>
+
+      <ul class="providers stagger" data-stagger="3">
+        <li class="prov prov--default">
+          <div class="prov__num">i.</div>
+          <div class="prov__name">Anthropic</div>
+          <div class="prov__model"><span class="mono">claude-sonnet-4-6</span></div>
+          <div class="prov__env"><span class="mono">ANTHROPIC_API_KEY</span></div>
+          <div class="prov__badge">DEFAULT</div>
+        </li>
+        <li class="prov">
+          <div class="prov__num">ii.</div>
+          <div class="prov__name">OpenAI</div>
+          <div class="prov__model"><span class="mono">gpt-4.1</span></div>
+          <div class="prov__env"><span class="mono">OPENAI_API_KEY</span></div>
+        </li>
+        <li class="prov">
+          <div class="prov__num">iii.</div>
+          <div class="prov__name">Google</div>
+          <div class="prov__model"><span class="mono">gemini-2.5-pro</span></div>
+          <div class="prov__env"><span class="mono">GOOGLE_GENERATIVE_AI_API_KEY</span></div>
+        </li>
+      </ul>
+
+      <p class="slide__caption stagger" data-stagger="4">
+        Vercel AI SDK 위에 얹은 단일 어댑터. Replay fixture는 provider별로 분리.
+      </p>
+    </div>
+  </section>
+
+  <!-- 11 MONOREPO -->
+  <section class="slide" data-slide="11" data-name="MONOREPO KB CHAIN" role="group" aria-roledescription="slide" aria-label="11 of 12 — Monorepo KB Chain">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 10 / SCALE</div>
+      <h2 class="slide__title stagger" data-stagger="1">모노레포가 자라도, 지식은 새지 않는다.</h2>
+
+      <div class="monorepo stagger" data-stagger="2">
+        <pre class="tree" aria-label="monorepo tree">
+<span class="t-dim">my-monorepo/</span>
+├── <span class="t-kb">.harvest/</span>                <span class="t-an">← root KB · 보편 지식</span>
+│   └── <span class="t-dim">INDEX.md</span>
+│
+├── apps/
+│   ├── <span class="t-app">web/</span>
+│   │   ├── src/
+│   │   └── <span class="t-kb">.harvest/</span>        <span class="t-an">← web 영역 KB</span>
+│   │
+│   └── <span class="t-app">api/</span>
+│       ├── src/
+│       └── <span class="t-kb">.harvest/</span>        <span class="t-an">← api 영역 KB</span>
+│
+└── packages/
+    └── <span class="t-pkg">shared-utils/</span>
+        └── <span class="t-kb">.harvest/</span>        <span class="t-an">← 공유 유틸 KB</span>
+</pre>
+
+        <div class="rules">
+          <div class="rule">
+            <span class="rule__num">→</span>
+            <p><strong>가장 가까운 KB가 우선.</strong> 자식 KB의 가이드가 root와 충돌하면 자식이 이긴다.</p>
+          </div>
+          <div class="rule">
+            <span class="rule__num">↑</span>
+            <p><strong>자동 promotion.</strong> 같은 패턴이 둘 이상의 자식 KB에서 발견되면 root로 승격.</p>
+          </div>
+          <div class="rule">
+            <span class="rule__num">⊥</span>
+            <p><strong>격리.</strong> app 전용 지식이 root로 새지 않도록 영역 마스킹이 강제된다.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12 RECAP -->
+  <section class="slide slide--end" data-slide="12" data-name="RECAP" role="group" aria-roledescription="slide" aria-label="12 of 12 — Recap">
+    <div class="slide__rule" aria-hidden="true"></div>
+    <div class="slide__inner">
+      <div class="slide__eyebrow stagger" data-stagger="0">§ 11 / RECAP · 한 페이지 요약</div>
+      <h2 class="slide__title stagger" data-stagger="1">
+        <em>휘발성 세션</em>을 영속 KB로.
+      </h2>
+      <p class="slide__lede stagger" data-stagger="2">
+        Claude Code 세션이 매번 같은 실수를 반복하지 않도록,<br/>
+        다섯 가지만 기억하면 됩니다.
+      </p>
+
+      <ol class="recap stagger" data-stagger="3">
+        <li class="recap__item">
+          <span class="recap__num">01</span>
+          <span class="recap__h">Problem</span>
+          <span class="recap__b">세션은 매번 휘발된다 — Decisions · Learnings · Reusable · Anti-patterns가 다음 세션으로 한 줄도 넘어가지 않는다.</span>
+        </li>
+        <li class="recap__item">
+          <span class="recap__num">02</span>
+          <span class="recap__h">Solution</span>
+          <span class="recap__b"><span class="mono">harvest init</span> → <span class="mono">harvest start</span>. 두 명령으로 transcript를 4-카테고리 마크다운 KB로 수확하고, <span class="mono">CLAUDE.md @</span>-import로 다음 세션에 자동 주입.</span>
+        </li>
+        <li class="recap__item">
+          <span class="recap__num">03</span>
+          <span class="recap__h">Position</span>
+          <span class="recap__b"><em>Push,</em> not Pull. <em>Concentration,</em> not Storage. 카테고리당 10·KB당 40 cap, 머지·supersede·archive가 신규 작성보다 우선.</span>
+        </li>
+        <li class="recap__item">
+          <span class="recap__num">04</span>
+          <span class="recap__h">Architecture</span>
+          <span class="recap__b">결정론 우선 — LLM은 EXTRACT + tie-break 두 곳에서만. atomic write · KB-단위 lock · idempotent ledger · 2-stage SIGINT.</span>
+        </li>
+        <li class="recap__item">
+          <span class="recap__num">05</span>
+          <span class="recap__h">Surface</span>
+          <span class="recap__b">3 providers (Anthropic / OpenAI / Google) · 모노레포 KB chain · 평문 마크다운 + git. 두 개의 명령. 그 외 표면 없음.</span>
+        </li>
+      </ol>
+
+      <div class="end-meta stagger" data-stagger="4">
+        <div class="end-col">
+          <div class="end-col__h">Status</div>
+          <div class="end-col__b">v0.1.0 · pre-release · Node ≥ 20</div>
+        </div>
+        <div class="end-col">
+          <div class="end-col__h">Try</div>
+          <div class="end-col__b"><span class="mono">harvest init</span> &nbsp;·&nbsp; <span class="mono">harvest start</span></div>
+        </div>
+        <div class="end-col">
+          <div class="end-col__h">Reference</div>
+          <div class="end-col__b"><span class="mono">harvest.md</span> · <span class="mono">product.md</span> · <span class="mono">README.md</span></div>
+        </div>
+      </div>
+
+      <div class="end-sign stagger" data-stagger="4">
+        <span class="end-sign__hr" aria-hidden="true"></span>
+        <span class="end-sign__lbl">FIN.</span>
+        <span class="end-sign__hr" aria-hidden="true"></span>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="script.js"></script>
+</body>
+</html>
