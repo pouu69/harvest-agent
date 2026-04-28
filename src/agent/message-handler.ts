@@ -83,6 +83,15 @@ export interface RunState {
    * future kill-switches.
    */
   abortReason?: "tool_loop";
+  /**
+   * Most recent `session_id` arg observed in a `mark_session_processed`
+   * `tool_call`. The runner compares this against the kickoff target's
+   * `session_id` after the loop finishes — when they diverge but the
+   * ledger has no entry for the target, the run is `deferred` because
+   * the agent marked the wrong session (A-005 follow-up). Stays
+   * `undefined` when mark was never called.
+   */
+  markedSessionId?: string;
 }
 
 /**
@@ -184,6 +193,12 @@ export function handleStep(
 
     case "tool_call": {
       const name = String(e.toolName ?? "?");
+      if (name === "mark_session_processed") {
+        const sid = (e.input as { session_id?: unknown } | null)?.session_id;
+        if (typeof sid === "string" && sid.length > 0) {
+          state.markedSessionId = sid;
+        }
+      }
       if (verbose) {
         const args = truncate(safeStringify(e.input ?? {}), 80);
         stderr.write(`[tool] ${name}(${args})\n`);

@@ -1,13 +1,13 @@
 ---
-generated_at: 2026-04-28T00:26:31.638Z
+generated_at: 2026-04-28T19:10:00.000Z
 schema_version: 1
 kb_path: .harvest
-total_items: 10
+total_items: 11
 counts:
   decisions: 4
   learnings: 1
   reusable: 1
-  anti-patterns: 4
+  anti-patterns: 5
 ---
 
 # Harvest Index — harvest-agent
@@ -19,6 +19,7 @@ counts:
 
 > severity: critical 인 것만. 절대 반복하지 말 것.
 
+- **[A-005 agent-self-terminates-mid-scan](anti-patterns/A-005-agent-self-terminates-mid-scan.md)** — list_unprocessed_sessions 결과를 끝까지 돌지 않고 일부만 처리한 채 자연 종료 (`src/agent/runner.ts, src/agent/system-prompt.ts`)
 - **[A-002 sigint-forced-exit-drops-work](anti-patterns/A-002-sigint-forced-exit-drops-work.md)** — SIGINT의 process.exit 강제 종료는 작업 유실/완료신호 부재 (`src/cli/start.ts, src/agent/runner.ts`)
 - **[A-001 extract-defaults-to-claude](anti-patterns/A-001-extract-defaults-to-claude.md)** — EXTRACT 모델 기본값 하드코딩으로 provider 불일치 유발 (`src/tools/analysis/extract-items.ts, src/llm/ai-sdk-caller.ts`)
 
@@ -47,6 +48,7 @@ counts:
 
 | ID | Title | Summary | Severity | Updated |
 |---|---|---|---|---|
+| A-005 | agent-self-terminates-mid-scan | list_unprocessed_sessions 결과를 끝까지 돌지 않고 일부만 처리한 채 자연 종료 | critical | 04-28 |
 | A-002 | sigint-forced-exit-drops-work | SIGINT의 process.exit 강제 종료는 작업 유실/완료신호 부재 | critical | 04-28 |
 | A-003 | uncommitted-cross-task-diff | Task 사이에 uncommitted 변경을 섞어 리뷰/원인 추적 불가 | normal | 04-28 |
 | A-004 | optional-empty-string-invalid | optional string에 빈 문자열을 넣으면 형식 검증에서 터진다 | normal | 04-28 |
@@ -56,7 +58,7 @@ counts:
 
 ## Status Summary
 
-- Active: 10 items
+- Active: 11 items
 - Deprecated: 0 items
 - Superseded: 0 items
 - Archived: 0 items

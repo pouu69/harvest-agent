@@ -47,6 +47,12 @@ import {
 } from "../llm/providers/index.js";
 
 import { runAgent, type RunAgentOptions, type RunAgentResult } from "../agent/runner.js";
+import {
+  listUnprocessedSessions,
+  safeListUnprocessedSessions,
+  type ListUnprocessedSessionsImpl,
+  type ListUnprocessedSessionsInput,
+} from "../tools/discovery/list-unprocessed-sessions.js";
 
 // -----------------------------------------------------------------------------
 // Public API
@@ -79,6 +85,12 @@ export interface StartOptions {
    * without invoking the SDK.
    */
   runAgentImpl?: (opts: RunAgentOptions) => Promise<RunAgentResult>;
+  /**
+   * Test-only injection seam for the pre-flight scope summary call.
+   * Production calls leave this undefined; tests pass a fake so they don't
+   * have to populate $HARVEST_TRANSCRIPT_DIR with real fixtures.
+   */
+  listUnprocessedSessionsImpl?: ListUnprocessedSessionsImpl;
 }
 
 /**
@@ -110,6 +122,31 @@ export async function runStart(opts: StartOptions): Promise<number> {
       );
     }
     return 3;
+  }
+
+  // ---- 1a. Pre-flight scope summary ----------------------------------------
+  //
+  // Symmetric to the end-of-run `✓ Harvest run complete (...)` line: surfaces
+  // collectible-vs-skipped counts up front, and short-circuits the run when
+  // 0 are collectible (an exhausted ledger should be a no-op, not an error).
+  // Also acts as a UX backstop for the early-stop failure mode logged in
+  // .harvest/anti-patterns/A-005-... — the user can compare the up-front
+  // count against the agent's eventual processed count.
+  const skipPreflight =
+    opts.runAgentImpl !== undefined &&
+    opts.listUnprocessedSessionsImpl === undefined;
+  if (!skipPreflight) {
+    const scope = await runPreflight({
+      kbChain,
+      discover: opts.discover,
+      since: opts.since,
+      listImpl: opts.listUnprocessedSessionsImpl ?? listUnprocessedSessions,
+      stderr,
+    });
+    if (scope !== null) {
+      stdout.write(formatPreflightSummary(scope, opts.recent) + "\n");
+      if (scope.total_count === 0) return 0;
+    }
   }
 
   // ---- 1b. Resolve provider + verify the matching API key is present ----
@@ -313,6 +350,111 @@ function toChainEntry(
 }
 
 // -----------------------------------------------------------------------------
+// Pre-flight scope summary
+// -----------------------------------------------------------------------------
+
+/**
+ * Counts surfaced by the pre-flight scan, narrowed to the fields the
+ * formatter needs. Mirrors `ListUnprocessedSessionsOutput` minus the
+ * full session array (which the CLI doesn't render).
+ */
+export interface PreflightScope {
+  total_count: number;
+  skipped_already_processed: number;
+  skipped_no_kb: number;
+  skipped_out_of_scope: number;
+}
+
+/**
+ * Run the pre-flight scope query against the resolved KB chain. Returns
+ * the scope counts on success, or `null` when the underlying tool errored
+ * (e.g. transcript dir missing) — the caller continues without a summary
+ * and lets the agent's own list_unprocessed_sessions surface the real error.
+ *
+ * Note: the agent re-scans on its first turn (§8.2 Step 1), so this is a
+ * duplicate enumeration. Accepted cost for symmetric start/end UX; the
+ * stat-shortcut (P-5) keeps already-processed candidates cheap.
+ *
+ * Skipped in tests where callers inject `runAgentImpl` without also
+ * injecting `listUnprocessedSessionsImpl` — the real call would either hit
+ * the user's ~/.claude/projects (non-hermetic) or short-circuit on a tmp
+ * dir and bypass the agent the test wants to exercise.
+ */
+async function runPreflight(args: {
+  kbChain: KBChainEntry[];
+  discover?: string;
+  since?: string;
+  listImpl: ListUnprocessedSessionsImpl;
+  stderr: NodeJS.WritableStream;
+}): Promise<PreflightScope | null> {
+  const cwdFilter = args.kbChain.map((e) => e.kb_dir);
+  const input: ListUnprocessedSessionsInput = {
+    cwd_filter: cwdFilter,
+    limit: 50,
+  };
+  if (args.discover !== undefined) input.discover_path = args.discover;
+  if (args.since !== undefined) input.since = args.since;
+  const result = await safeListUnprocessedSessions(
+    args.listImpl,
+    input,
+    "pre-flight scope scan",
+    args.stderr,
+  );
+  if (result === null) return null;
+  return {
+    total_count: result.total_count,
+    skipped_already_processed: result.skipped_already_processed,
+    skipped_no_kb: result.skipped_no_kb,
+    skipped_out_of_scope: result.skipped_out_of_scope,
+  };
+}
+
+/**
+ * Render the one-line scope summary printed at the top of `harvest start`.
+ * Pure function — exported for unit testing.
+ *
+ * Format:
+ *   `▸ Harvest start — N collectible / M total (already: A, out-of-scope: B, no-KB: C)`
+ *
+ * 0-collectible case appends ` — 처리할 세션 없음` so the user understands
+ * why the run will short-circuit.
+ *
+ * `recent` annotation is added only when the cap is meaningful — i.e. set
+ * AND below the collectible count. When `--recent 20` exceeds collectible,
+ * the cap doesn't change anything and the annotation would just be noise.
+ */
+export function formatPreflightSummary(
+  scope: PreflightScope,
+  recent?: number,
+): string {
+  const collectible = scope.total_count;
+  const total =
+    collectible +
+    scope.skipped_already_processed +
+    scope.skipped_no_kb +
+    scope.skipped_out_of_scope;
+  const breakdown: string[] = [];
+  if (scope.skipped_already_processed > 0) {
+    breakdown.push(`already: ${scope.skipped_already_processed}`);
+  }
+  if (scope.skipped_out_of_scope > 0) {
+    breakdown.push(`out-of-scope: ${scope.skipped_out_of_scope}`);
+  }
+  if (scope.skipped_no_kb > 0) {
+    breakdown.push(`no-KB: ${scope.skipped_no_kb}`);
+  }
+  let line = `▸ Harvest start — ${collectible} collectible / ${total} total`;
+  if (breakdown.length > 0) line += ` (${breakdown.join(", ")})`;
+  if (recent !== undefined && collectible > recent) {
+    line += ` — recent ${recent} (상위 ${recent}개 처리)`;
+  }
+  if (collectible === 0) {
+    line += " — 처리할 세션 없음";
+  }
+  return line;
+}
+
+// -----------------------------------------------------------------------------
 // Summary line
 // -----------------------------------------------------------------------------
 
@@ -323,18 +465,41 @@ function renderSummary(result: RunAgentResult): string {
   // token counts the loop *does* report instead. Cost can be reattached
   // when a per-provider price helper lands.
   const usage = formatTokenUsage(result);
+  const recon = formatReconciliation(result);
   if (result.exitCode === 0) {
-    return `\n✓ Harvest run complete (${turns} turns${usage})\n`;
+    return `\n✓ Harvest run complete (${turns} turns${usage})${recon}\n`;
   }
   if (result.resultSubtype === "error_max_turns") {
-    return `\n⚠ Harvest run hit max_turns (${turns} turns${usage}). Partial results committed.\n`;
+    return `\n⚠ Harvest run hit max_turns (${turns} turns${usage}). Partial results committed.${recon}\n`;
   }
   if (result.resultSubtype === "error_tool_loop") {
-    return `\n⚠ Harvest run aborted: 동일 도구 에러가 반복되어 자동 중단됨 (${turns} turns${usage}). Partial results committed.\n`;
+    return `\n⚠ Harvest run aborted: 동일 도구 에러가 반복되어 자동 중단됨 (${turns} turns${usage}). Partial results committed.${recon}\n`;
   }
   // Lock / SDK errors don't have a result subtype — caller already wrote
   // an Error: line to stderr; just emit a brief stdout marker.
   return `\n✗ Harvest run failed (exit ${result.exitCode}).\n`;
+}
+
+/**
+ * Render the deterministic reconciliation line. Empty string when the
+ * runner didn't snapshot a target list (degraded / legacy path); otherwise
+ * `\n  세션: X / Y 처리됨` with a re-run hint when any IDs deferred.
+ *
+ * Indented under the completion line so it reads as a continuation, not a
+ * separate event.
+ */
+function formatReconciliation(result: RunAgentResult): string {
+  if (result.targetCount === undefined) return "";
+  const target = result.targetCount;
+  const processed = result.processedCount ?? 0;
+  const deferred = result.deferredCount ?? 0;
+  if (deferred === 0) {
+    return `\n  세션: ${processed} / ${target} 처리됨`;
+  }
+  return (
+    `\n  세션: ${processed} / ${target} 처리됨 (${deferred}개 deferred — ` +
+    `다시 실행하면 이어서 처리됩니다)`
+  );
 }
 
 /**

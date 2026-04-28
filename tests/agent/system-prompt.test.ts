@@ -48,6 +48,20 @@ describe("AGENT_SYSTEM_PROMPT", () => {
     expect(AGENT_SYSTEM_PROMPT).toContain("max_turns");
   });
 
+  it("enumerates all five SkippedReason values (A-005 follow-up)", () => {
+    // The agent kept defaulting to `multi-kb-session` for read_transcript
+    // failures because the prompt only listed `trivial` and `multi-kb-session`
+    // — see anti-patterns/A-005 + the 2026-04-28 dogfooding log. The
+    // SkippedReason enum (`src/core/types.ts`) has five values, all of which
+    // must be visible in the prompt so the agent picks the right one.
+    expect(AGENT_SYSTEM_PROMPT).toContain("transcript-corrupt");
+    expect(AGENT_SYSTEM_PROMPT).toContain("low-value");
+    expect(AGENT_SYSTEM_PROMPT).toContain("multi-kb-session");
+    expect(AGENT_SYSTEM_PROMPT).toContain("trivial");
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/\bother\b/);
+    expect(AGENT_SYSTEM_PROMPT).toContain("Skip reason 가이드");
+  });
+
   it("preserves the literal backticks around estimated_tokens", () => {
     // §8.2 line 783 references the field as `estimated_tokens` (with
     // markdown-style backticks). This verifies the String.raw + ${"`"}

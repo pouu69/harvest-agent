@@ -160,6 +160,48 @@ export interface ListUnprocessedSessionsErrorOutput {
 }
 
 /**
+ * Type of the {@link listUnprocessedSessions} call (success | error union).
+ * Both `runAgent` (`src/agent/runner.ts`) and `runStart`
+ * (`src/cli/start.ts`) wrap this call with the same try/catch + stderr warn
+ * + null-on-error pattern via {@link safeListUnprocessedSessions}.
+ */
+export type ListUnprocessedSessionsImpl = (
+  input: ListUnprocessedSessionsInput,
+) => Promise<ListUnprocessedSessionsOutput | ListUnprocessedSessionsErrorOutput>;
+
+/**
+ * Wrap a {@link ListUnprocessedSessionsImpl} call so error / throw paths
+ * collapse to `null`. Lets callers (CLI pre-flight, runner snapshot) stay
+ * focused on the success path.
+ *
+ * The `errorContext` is prefixed to the stderr warning so users can tell
+ * which call site degraded.
+ */
+export async function safeListUnprocessedSessions(
+  impl: ListUnprocessedSessionsImpl,
+  input: ListUnprocessedSessionsInput,
+  errorContext: string,
+  stderr: NodeJS.WritableStream,
+): Promise<ListUnprocessedSessionsOutput | null> {
+  try {
+    const result = await impl(input);
+    if ("error" in result) {
+      stderr.write(
+        `Warning: ${errorContext} returned ${result.error}; continuing without it.\n`,
+      );
+      return null;
+    }
+    return result;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr.write(
+      `Warning: ${errorContext} threw (${msg}); continuing without it.\n`,
+    );
+    return null;
+  }
+}
+
+/**
  * Test seam. All fields default to live system behavior.
  */
 export interface ListUnprocessedSessionsDeps {

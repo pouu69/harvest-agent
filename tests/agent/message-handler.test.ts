@@ -153,6 +153,64 @@ describe("handleStep — tool_call", () => {
     );
     expect(readCaptured(stderr).length).toBeLessThan(300);
   });
+
+  // A-005 follow-up: when verifySessionInLedger reports `deferred` even though
+  // the agent visibly invoked mark_session_processed (e.g. with a typo in the
+  // session_id arg), the runner needs to surface the mismatch. handleStep
+  // captures the most recent mark argument so the runner can compare.
+  it("captures session_id from mark_session_processed tool_call into RunState.markedSessionId", () => {
+    const state: RunState = {};
+    send(
+      {
+        type: "tool_call",
+        toolName: "mark_session_processed",
+        input: { session_id: "abc12345-1111-2222-3333-444455556666" },
+      },
+      state,
+      { verbose: false, stderr: captured() },
+    );
+    expect(state.markedSessionId).toBe(
+      "abc12345-1111-2222-3333-444455556666",
+    );
+  });
+
+  it("ignores non-string session_id args silently", () => {
+    const state: RunState = {};
+    send(
+      {
+        type: "tool_call",
+        toolName: "mark_session_processed",
+        input: { session_id: 12345 },
+      },
+      state,
+      { verbose: false, stderr: captured() },
+    );
+    expect(state.markedSessionId).toBeUndefined();
+  });
+
+  it("retains the latest markedSessionId when mark is called twice", () => {
+    const state: RunState = {};
+    const stderr = captured();
+    send(
+      {
+        type: "tool_call",
+        toolName: "mark_session_processed",
+        input: { session_id: "first" },
+      },
+      state,
+      { verbose: false, stderr },
+    );
+    send(
+      {
+        type: "tool_call",
+        toolName: "mark_session_processed",
+        input: { session_id: "second" },
+      },
+      state,
+      { verbose: false, stderr },
+    );
+    expect(state.markedSessionId).toBe("second");
+  });
 });
 
 describe("handleStep — assistant_text & tool_result", () => {

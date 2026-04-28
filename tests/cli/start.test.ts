@@ -18,7 +18,12 @@ import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { cleanupOnSignal, installSigintHandler, runStart } from "../../src/cli/start.js";
+import {
+  cleanupOnSignal,
+  formatPreflightSummary,
+  installSigintHandler,
+  runStart,
+} from "../../src/cli/start.js";
 import type { KBChainEntry } from "../../src/core/types.js";
 
 let root: string;
@@ -186,6 +191,88 @@ describe("runStart — happy path", () => {
   });
 });
 
+describe("runStart — reconciliation in completion summary", () => {
+  it("appends '12 / 20 processed (8 deferred)' when targets remained unprocessed", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const stdout = captured0();
+    const code = await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout,
+      stderr: captured0(),
+      env: { ANTHROPIC_API_KEY: "sk-test" } as NodeJS.ProcessEnv,
+      runAgentImpl: async () => ({
+        exitCode: 0,
+        numTurns: 23,
+        resultSubtype: "success",
+        targetCount: 20,
+        processedCount: 12,
+        deferredCount: 8,
+        deferredSessionIds: Array.from({ length: 8 }, (_, i) => `def${i}`),
+      }),
+    });
+    expect(code).toBe(0);
+    const out = read(stdout);
+    expect(out).toContain("Harvest run complete");
+    expect(out).toContain("12 / 20");
+    expect(out).toContain("8");
+    // The user told us "갑자기 종료됐다" — make the next-step explicit.
+    expect(out).toMatch(/다시 실행|re-run/);
+  });
+
+  it("appends 'all N processed' when reconciliation is fully covered", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const stdout = captured0();
+    await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout,
+      stderr: captured0(),
+      env: { ANTHROPIC_API_KEY: "sk-test" } as NodeJS.ProcessEnv,
+      runAgentImpl: async () => ({
+        exitCode: 0,
+        numTurns: 12,
+        resultSubtype: "success",
+        targetCount: 5,
+        processedCount: 5,
+        deferredCount: 0,
+      }),
+    });
+    const out = read(stdout);
+    expect(out).toContain("5 / 5");
+    // No "deferred" / "다시 실행" hint when everything completed.
+    expect(out).not.toMatch(/다시 실행|re-run/);
+  });
+
+  it("omits reconciliation line when runner did not snapshot a target list", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const stdout = captured0();
+    await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout,
+      stderr: captured0(),
+      env: { ANTHROPIC_API_KEY: "sk-test" } as NodeJS.ProcessEnv,
+      runAgentImpl: async () => ({
+        exitCode: 0,
+        numTurns: 5,
+        resultSubtype: "success",
+        // No targetCount → snapshot failed / degraded. CLI should not
+        // invent a "0 / 0" line.
+      }),
+    });
+    const out = read(stdout);
+    expect(out).toContain("Harvest run complete");
+    expect(out).not.toMatch(/\d+ \/ \d+/);
+  });
+});
+
 describe("runStart — exit code propagation", () => {
   it("propagates exit code 4 (lock blocked) from runAgent", async () => {
     mkdirSync(path.join(root, ".harvest"), { recursive: true });
@@ -335,6 +422,19 @@ describe("runStart — provider + API key validation (PLAN_MULTI_PROVIDER §6)",
     expect(capturedProvider).toBe("google");
   });
 
+  // The 3 tests below intentionally don't inject runAgentImpl — they
+  // exercise the real key/provider validation path. They DO inject
+  // listUnprocessedSessionsImpl so the pre-flight scan doesn't short-
+  // circuit on a 0-collectible empty tmp dir before the key check fires.
+  const nonEmptyPreflight = async () =>
+    ({
+      sessions: [],
+      total_count: 5,
+      skipped_already_processed: 0,
+      skipped_no_kb: 0,
+      skipped_out_of_scope: 0,
+    });
+
   it("returns exit 5 with a clear message when the matching API key is unset", async () => {
     mkdirSync(path.join(root, ".harvest"), { recursive: true });
     const stderr = captured();
@@ -347,6 +447,7 @@ describe("runStart — provider + API key validation (PLAN_MULTI_PROVIDER §6)",
       json: false,
       stdout: captured0(),
       stderr,
+      listUnprocessedSessionsImpl: nonEmptyPreflight,
       // No runAgentImpl → real key validation kicks in.
     });
     expect(code).toBe(5);
@@ -365,6 +466,7 @@ describe("runStart — provider + API key validation (PLAN_MULTI_PROVIDER §6)",
       json: false,
       stdout: captured0(),
       stderr,
+      listUnprocessedSessionsImpl: nonEmptyPreflight,
     });
     expect(code).toBe(5);
     expect(read(stderr)).toMatch(/OPENAI_API_KEY is not set/);
@@ -381,9 +483,176 @@ describe("runStart — provider + API key validation (PLAN_MULTI_PROVIDER §6)",
       json: false,
       stdout: captured0(),
       stderr,
+      listUnprocessedSessionsImpl: nonEmptyPreflight,
     });
     expect(code).toBe(2);
     expect(read(stderr)).toMatch(/HARVEST_PROVIDER/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-flight scope summary (regression guard for early-stop bug — see
+// .harvest/anti-patterns/A-005-agent-self-terminates-mid-scan.md)
+// ---------------------------------------------------------------------------
+
+describe("formatPreflightSummary — pure formatter", () => {
+  it("renders collectible / total with breakdown of skipped categories", () => {
+    const out = formatPreflightSummary({
+      total_count: 5,
+      skipped_already_processed: 100,
+      skipped_no_kb: 2,
+      skipped_out_of_scope: 8,
+    });
+    expect(out).toContain("▸ Harvest start");
+    expect(out).toContain("5 collectible");
+    // total enumerated = survivors + all skipped buckets
+    expect(out).toContain("115 total");
+    expect(out).toContain("already: 100");
+    expect(out).toContain("out-of-scope: 8");
+    expect(out).toContain("no-KB: 2");
+  });
+
+  it("0 collectible renders the '처리할 세션 없음' suffix", () => {
+    const out = formatPreflightSummary({
+      total_count: 0,
+      skipped_already_processed: 50,
+      skipped_no_kb: 0,
+      skipped_out_of_scope: 0,
+    });
+    expect(out).toContain("0 collectible");
+    expect(out).toContain("처리할 세션 없음");
+  });
+
+  it("annotates the recent cap when set and below collectible", () => {
+    const out = formatPreflightSummary(
+      {
+        total_count: 44,
+        skipped_already_processed: 1100,
+        skipped_no_kb: 10,
+        skipped_out_of_scope: 80,
+      },
+      20,
+    );
+    expect(out).toContain("44 collectible");
+    expect(out).toContain("recent 20");
+  });
+
+  it("omits the recent annotation when the cap covers everything", () => {
+    const out = formatPreflightSummary(
+      {
+        total_count: 5,
+        skipped_already_processed: 0,
+        skipped_no_kb: 0,
+        skipped_out_of_scope: 0,
+      },
+      20,
+    );
+    expect(out).toContain("5 collectible");
+    expect(out).not.toContain("recent 20");
+  });
+});
+
+describe("runStart — pre-flight summary line", () => {
+  it("prints '▸ Harvest start ...' before invoking agent", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    const stdout = captured0();
+    let agentCalledAfterSummary = false;
+    let summaryWrittenBeforeAgent = false;
+    const code = await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout,
+      stderr: captured0(),
+      env: { ANTHROPIC_API_KEY: "sk-test" } as NodeJS.ProcessEnv,
+      listUnprocessedSessionsImpl: async () => ({
+        sessions: [],
+        total_count: 5,
+        skipped_already_processed: 100,
+        skipped_no_kb: 2,
+        skipped_out_of_scope: 8,
+      }),
+      runAgentImpl: async () => {
+        if (read(stdout).includes("▸ Harvest start")) {
+          summaryWrittenBeforeAgent = true;
+        }
+        agentCalledAfterSummary = true;
+        return { exitCode: 0, resultSubtype: "success" };
+      },
+    });
+    expect(code).toBe(0);
+    expect(agentCalledAfterSummary).toBe(true);
+    expect(summaryWrittenBeforeAgent).toBe(true);
+    const out = read(stdout);
+    expect(out).toContain("5 collectible");
+    expect(out).toContain("115 total");
+  });
+
+  it("returns 0 without invoking agent when 0 collectible", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    let agentCalled = false;
+    const stdout = captured0();
+    const code = await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout,
+      stderr: captured0(),
+      env: {} as NodeJS.ProcessEnv, // no API key — must not be required
+      listUnprocessedSessionsImpl: async () => ({
+        sessions: [],
+        total_count: 0,
+        skipped_already_processed: 50,
+        skipped_no_kb: 0,
+        skipped_out_of_scope: 0,
+      }),
+      runAgentImpl: async () => {
+        agentCalled = true;
+        return { exitCode: 0, resultSubtype: "success" };
+      },
+    });
+    expect(code).toBe(0);
+    expect(agentCalled).toBe(false);
+    expect(read(stdout)).toContain("처리할 세션 없음");
+    // Confirm the agent's normal completion line did NOT print
+    // (it would conflict with the short-circuit messaging).
+    expect(read(stdout)).not.toContain("Harvest run complete");
+  });
+
+  it("forwards cwd_filter (kbChain dirs) + recent + since to the pre-flight call", async () => {
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    let captured: { cwd_filter?: string[]; recent?: number; since?: string } | null = null;
+    await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      recent: 7,
+      since: "2026-04-01T00:00:00Z",
+      stdout: captured0(),
+      stderr: captured0(),
+      env: { ANTHROPIC_API_KEY: "sk-test" } as NodeJS.ProcessEnv,
+      listUnprocessedSessionsImpl: async (input) => {
+        captured = {
+          cwd_filter: input.cwd_filter,
+          recent: input.limit,
+          since: input.since,
+        };
+        return {
+          sessions: [],
+          total_count: 3,
+          skipped_already_processed: 0,
+          skipped_no_kb: 0,
+          skipped_out_of_scope: 0,
+        };
+      },
+      runAgentImpl: async () => ({ exitCode: 0, resultSubtype: "success" }),
+    });
+    expect(captured).toBeTruthy();
+    expect(captured!.cwd_filter).toEqual([root]);
+    expect(captured!.since).toBe("2026-04-01T00:00:00Z");
   });
 });
 
