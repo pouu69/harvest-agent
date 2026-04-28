@@ -1,9 +1,27 @@
 /**
  * `get_kb_chain` deterministic tool, per harvest.md §9.3 (lines 1142–1181).
  *
- * Wraps `findKbChain(cwd)` (§5.1) and produces the `KBChainEntry[]` shape from
- * §9.3 with all derived fields (`is_root`, `depth_from_cwd`, `region_globs`,
- * `relative_to_cwd`).
+ * Wraps `findKbChain(cwd)` (§5.1, walk-up) **and** `walkForKbsBelow(cwd)`
+ * (descent within the cwd subtree) and produces the `KBChainEntry[]` shape
+ * from §9.3 with all derived fields (`is_root`, `depth_from_cwd`,
+ * `region_globs`, `relative_to_cwd`).
+ *
+ * # Why walk-up ∪ walk-down (I-16)
+ *
+ * §5.1 defines `findKbChain` as walk-up only. That's correct for the
+ * "ancestor chain" concept of the spec. But per §5.3 the agent routes each
+ * item to its closest KB *based on touched files*, and a session whose cwd
+ * sits at a monorepo root must be able to see nested sub-app KBs as routing
+ * targets — otherwise items touching `<root>/apps/web/foo.ts` get pinned to
+ * the root KB simply because the agent doesn't know `<root>/apps/web/.harvest`
+ * exists. Mirroring `cli/start.ts:resolveKbChain`, this tool returns the
+ * union so per-item routing has the full candidate set.
+ *
+ * Order: descent entries first (alpha-sorted for determinism), then ascent
+ * entries (closest-ancestor-first → topmost root last). The cwd's own KB
+ * appears in both walks; we dedupe so it stays in its ascent slot. This
+ * keeps `is_root: index === arr.length - 1` pointing at the topmost
+ * ancestor, matching §9.3.
  *
  * # Region globs construction
  *
@@ -15,8 +33,7 @@
  *   - For every other KB in the chain whose `kb_dir` is strictly nested
  *     inside this KB's `kb_dir`, append `!<rel>/**` where `rel` is
  *     `path.relative(thisKbDir, otherKbDir)` with POSIX separators.
- *   - The leaf (closest-to-cwd) KB ends up with just `["**"]` because no
- *     other KBs in the chain are nested inside it.
+ *   - Leaf KBs (no other chain KBs nested inside) end up with just `["**"]`.
  *
  * Order: globs are appended in chain order so the resulting array is
  * deterministic across runs.
@@ -24,8 +41,8 @@
  * # depth_from_cwd
  *
  * `0` iff `kb_dir === cwd`. Otherwise the count of `path.relative(cwd, kb_dir)`
- * components — for an ancestor KB, every "../" hop counts. POSIX path
- * separator. This is documented at the call site too (§9.3 line 1162).
+ * components — for an ancestor KB, every "../" hop counts; for a descent KB,
+ * every nested-dir hop counts. POSIX path separator. (§9.3 line 1162.)
  *
  * Layered architecture: imports `node:*`, `zod`, intra-`core/`. Never imports
  * from `cli/` or `agent/`.
@@ -35,7 +52,12 @@ import * as path from "node:path";
 
 import { z } from "zod";
 
-import { computeDepthFromCwd, findKbChain } from "../../core/kb/chain.js";
+import {
+  computeDepthFromCwd,
+  findKbChain,
+  MAX_DISCOVER_DEPTH,
+  walkForKbsBelow,
+} from "../../core/kb/chain.js";
 import type { KBChainEntry } from "../../core/types.js";
 
 // -----------------------------------------------------------------------------
@@ -61,8 +83,13 @@ export interface GetKbChainErrorOutput {
 }
 
 export interface GetKbChainDeps {
-  /** Override KB chain lookup; defaults to {@link findKbChain}. */
+  /** Override walk-up KB chain lookup; defaults to {@link findKbChain}. */
   findKbChainFn?: (cwd: string) => string[];
+  /**
+   * Override descent KB lookup; defaults to {@link walkForKbsBelow}. Tests
+   * use this to inject a fake filesystem without setting up tmpdirs.
+   */
+  walkForKbsBelowFn?: (root: string, maxDepth: number) => string[];
 }
 
 // -----------------------------------------------------------------------------
@@ -82,12 +109,20 @@ export async function getKbChain(
     };
   }
 
-  const find = deps.findKbChainFn ?? findKbChain;
-  const chain = find(input.cwd);
+  const findUp = deps.findKbChainFn ?? findKbChain;
+  const walkDown = deps.walkForKbsBelowFn ?? walkForKbsBelow;
+
+  const ascent = findUp(input.cwd);
+  const descentRaw = walkDown(input.cwd, MAX_DISCOVER_DEPTH);
+  const ascentSet = new Set(ascent);
+  const descent = descentRaw.filter((kb) => !ascentSet.has(kb));
+  descent.sort();
+  const chain = [...descent, ...ascent];
+
   if (chain.length === 0) {
     return {
       error: "kb_chain_empty",
-      message: `cwd 위쪽 어떤 디렉토리에도 .harvest/가 없습니다: ${input.cwd}`,
+      message: `cwd 위/아래 어떤 디렉토리에도 .harvest/가 없습니다: ${input.cwd}`,
       suggest:
         "사전 필터에서 빠진 escape 케이스. 이 세션은 그냥 skip하고 다음 진행 (기록할 KB 없음, mark_session_processed 호출 X)",
       details: { cwd: input.cwd },

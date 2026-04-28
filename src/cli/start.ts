@@ -33,13 +33,15 @@
  * This module is the entry point a user-typed command lands on.
  */
 
-import { existsSync, readdirSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import * as path from "node:path";
 
 import {
   computeDepthFromCwd,
   computeKbRegion,
   findKbChain,
+  MAX_DISCOVER_DEPTH,
+  walkForKbsBelow,
 } from "../core/kb/chain.js";
 import { buildIndexMarkdown } from "../core/kb/index-builder.js";
 import { nowIso } from "../core/time.js";
@@ -290,7 +292,7 @@ function resolveKbChain(opts: StartOptions): KBChainEntry[] {
     return discoverKbChain(opts.discover, opts.cwd);
   }
   const ascent = findKbChain(opts.cwd);
-  const descentRaw = walkForKbs(opts.cwd, MAX_DISCOVER_DEPTH);
+  const descentRaw = walkForKbsBelow(opts.cwd, MAX_DISCOVER_DEPTH);
   const ascentSet = new Set(ascent);
   const descent = descentRaw.filter((kb) => !ascentSet.has(kb));
   descent.sort();
@@ -298,57 +300,6 @@ function resolveKbChain(opts: StartOptions): KBChainEntry[] {
   return merged.map((kbPath, i, arr) =>
     toChainEntry(kbPath, opts.cwd, i, arr),
   );
-}
-
-const MAX_DISCOVER_DEPTH = 6;
-
-/**
- * Walk a directory tree depth-bounded looking for `.harvest/` directories.
- * Returns absolute paths of every match in filesystem-walk order (callers
- * sort if they need a deterministic order).
- *
- * Pruning matches the historical {@link discoverKbChain} behavior: skip
- * `node_modules` and dotted dirs (the latter naturally excludes nested
- * `.harvest/` from being descended into — they were already captured at
- * this level before the prune kicks in).
- *
- * Used by both {@link discoverKbChain} (legacy `--discover` mode) and the
- * default {@link resolveKbChain} path (descent half of the union).
- */
-function walkForKbs(root: string, maxDepth: number): string[] {
-  const rootAbs = path.resolve(root);
-  const out: string[] = [];
-  if (!existsSync(rootAbs)) return out;
-
-  const stack: Array<{ dir: string; depth: number }> = [
-    { dir: rootAbs, depth: 0 },
-  ];
-
-  while (stack.length > 0) {
-    const { dir, depth } = stack.pop()!;
-    if (depth > maxDepth) continue;
-
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const e of entries) {
-      if (!e.isDirectory()) continue;
-      if (e.name === ".harvest") {
-        out.push(path.join(dir, ".harvest"));
-        continue;
-      }
-      // Skip noise + nested .harvest's (they were already captured above).
-      if (e.name === "node_modules") continue;
-      if (e.name.startsWith(".")) continue;
-      stack.push({ dir: path.join(dir, e.name), depth: depth + 1 });
-    }
-  }
-
-  return out;
 }
 
 /**
@@ -361,7 +312,7 @@ function walkForKbs(root: string, maxDepth: number): string[] {
  * `--discover` flag.
  */
 function discoverKbChain(discoverPath: string, cwd: string): KBChainEntry[] {
-  const out = walkForKbs(discoverPath, MAX_DISCOVER_DEPTH);
+  const out = walkForKbsBelow(discoverPath, MAX_DISCOVER_DEPTH);
   // Sort closest-to-root first for stable ordering. (This isn't quite the
   // same as cwd-based "closest-first" semantics, but for --discover we
   // surface them all and the agent decides per-session via get_kb_chain.)

@@ -1153,7 +1153,7 @@ z.object({
 })
 ```
 
-**동작**: 결정론. §5.1 알고리즘 (cwd → 위로 .harvest/ 탐색, .git 발견 시 정지).
+**동작**: 결정론. §5.1 walk-up (cwd → 위로 `.harvest/` 탐색, `.git` 발견 시 정지) **∪ walk-down** (cwd 서브트리에서 nested `.harvest/` 발견; 깊이 6, `node_modules`/dotted dirs prune). cwd 자기 KB 는 dedupe 되어 단 한 번 등장. monorepo root 에서 시작한 세션이 sub-app `.harvest/` 를 라우팅 후보로 인식하기 위함 (I-16). chain 순서: `[descent alpha-sorted, ascent closest-ancestor → topmost root]`; `is_root` 는 마지막 entry (=topmost ancestor).
 
 **반환**:
 ```typescript

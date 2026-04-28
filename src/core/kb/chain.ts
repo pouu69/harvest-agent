@@ -19,6 +19,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 /**
+ * Default depth cap for {@link walkForKbsBelow}. 6 levels is enough to cover
+ * typical monorepo layouts (e.g., `apps/<name>/<sub>`) without descending
+ * into deep dependency trees.
+ */
+export const MAX_DISCOVER_DEPTH = 6;
+
+/**
  * Walks parent directories from `cwd` and returns absolute paths to every
  * `.harvest/` directory, ordered closest → farthest.
  *
@@ -143,6 +150,59 @@ export function computeDepthFromCwd(cwd: string, kbDir: string): number {
   const rel = path.relative(kbAbs, cwdAbs);
   if (rel === "" || rel === ".") return 0;
   return rel.split(path.sep).length;
+}
+
+/**
+ * Depth-bounded walk-down: enumerate `.harvest/` directories below `root`.
+ *
+ * Returns absolute paths in filesystem-walk order (callers sort if a
+ * deterministic order is required). Returns `[]` if `root` doesn't exist.
+ *
+ * Pruning rules:
+ *   - skip `node_modules` (heavy, never relevant)
+ *   - skip dotted dirs (incl. `.git`, `.next`, etc.) — `.harvest/` itself is
+ *     captured at the parent level *before* the dotted-dir prune fires, so
+ *     we never recurse into a `.harvest/` we've already collected
+ *
+ * Used by:
+ *   - `cli/start.ts:resolveKbChain` (descent half of launch chain)
+ *   - `cli/start.ts:discoverKbChain` (legacy `--discover <path>`)
+ *   - `tools/discovery/get_kb_chain` (descent half of per-session chain — the
+ *     fix for I-16, where root-cwd sessions used to be blind to nested KBs)
+ */
+export function walkForKbsBelow(root: string, maxDepth: number): string[] {
+  const rootAbs = path.resolve(root);
+  const out: string[] = [];
+  if (!existsAsDirectory(rootAbs)) return out;
+
+  const stack: Array<{ dir: string; depth: number }> = [
+    { dir: rootAbs, depth: 0 },
+  ];
+
+  while (stack.length > 0) {
+    const { dir, depth } = stack.pop()!;
+    if (depth > maxDepth) continue;
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      if (e.name === ".harvest") {
+        out.push(path.join(dir, ".harvest"));
+        continue;
+      }
+      if (e.name === "node_modules") continue;
+      if (e.name.startsWith(".")) continue;
+      stack.push({ dir: path.join(dir, e.name), depth: depth + 1 });
+    }
+  }
+
+  return out;
 }
 
 // -----------------------------------------------------------------------------

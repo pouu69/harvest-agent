@@ -247,6 +247,43 @@ export function nowIso(): string {
 
 **부수 변경 (`harvest start` 요약 라인)**: `✓ Harvest run complete (12 turns, $0.0000 total)` 의 `$0.0000` 은 AI SDK 가 provider 별 cost 를 normalize 하지 않아 항상 0 으로 표시되어 오해 유발. 토큰 카운트 (`47.5K in / 12.3K out tokens`) 로 교체. `RunAgentResult` 에 `inputTokens` / `outputTokens` 추가, `RunState.inputTokens` / `outputTokens` 추가, `formatTokenUsage` / `formatTokenCount` 헬퍼 도입. Cost 는 per-provider price helper 가 도입되면 다시 추가 가능.
 
+### I-16. `get_kb_chain` walk-up only — sub-app KB 가 per-session 라우팅에 invisible
+
+**상태**: ✅ **resolved** (2026-04-28)
+
+**위치**:
+- §9.3 `get_kb_chain` 도구 정의 — 입력은 `cwd`, 출력은 §5.1 `findKbChain(cwd)` 결과를 fields wrapping. §5.1 자체는 walk-up only 정의.
+- §5.3 per-item 라우팅 — 항목은 *touched files* 기준으로 가장 가까운 KB 에 들어간다.
+
+**원래 결함**: I-15 가 **runner** 의 launch chain 을 walk-up + walk-down 으로 바꿨지만, **에이전트가 per-session 라우팅에 사용하는 `get_kb_chain(session.cwd)`** 는 그대로 walk-up only. 결과:
+
+1. 세션 cwd 가 sub-app(`<root>/one/`)이면: walk-up 이 `[<root>/one/.harvest, <root>/.harvest]` 를 잡아주므로 정상 ✅
+2. 세션 cwd 가 monorepo **root**(`<root>/`)이면: chain = `[<root>/.harvest]` 만 → 에이전트는 sub-app KB 의 *존재 자체를 모름*. `<root>/one/foo.ts` 를 touch 한 항목조차 sub-app KB 에 라우팅할 수단이 없어 root 로 떨어짐 ❌
+
+§5.3 의 per-item 라우팅은 정상 의도이지만, 에이전트가 KB 후보 집합을 모르면 라우팅 자체가 불가능. I-15 가 runner 측 chain 을 풍부하게 했어도 에이전트가 호출하는 도구는 별도 함수라 영향이 미치지 않았음.
+
+**증상** (사용자 dogfooding, 2026-04-28):
+- I-15 fix 후에도 *"아직도 root 에만 문서가 쌓이는 경우가 강하다"*.
+- launch cwd 가 sub-app 인 경우(예: `/one/` 에서 `harvest start`) 에는 정상 라우팅 — 이번 결함이 가시화되지 않음.
+- launch cwd 가 monorepo root 인 경우 sub-app 세션은 walk-up 으로 자기 KB 를 찾지만, **root cwd 세션** 이 sub-app 파일을 touch 한 항목은 root 로 박힘.
+
+**해소**:
+
+1. **`get_kb_chain` 확장**: `findKbChain(cwd)` (walk-up) + `walkForKbsBelow(cwd, depth=6)` (walk-down) 의 dedupe 합집합. 순서는 `cli/start.ts:resolveKbChain` 과 동일 (`[descent alpha-sorted, ascent closest-first]`). `is_root: index === chain.length - 1` 가 그대로 topmost ancestor 를 가리킴.
+2. **`walkForKbsBelow` 헬퍼를 core 로 이동**: 기존 `cli/start.ts:walkForKbs` 를 `core/kb/chain.ts:walkForKbsBelow` 로 옮겨 cli 와 tools 가 공유. layering 위반 없이 `tools/discovery/get-kb-chain.ts` 가 import 가능. `MAX_DISCOVER_DEPTH=6` 도 같이 core 로 이동.
+3. **§5.1 의 `findKbChain` 시맨틱 보존**: walk-up only 정의는 그대로. 새 헬퍼는 별도 함수로 추가 — §5.1 정의 자체를 깨뜨리지 않음.
+4. **per-item 라우팅 보존**: §5.3 (touched files 기반) 그대로. 단, 에이전트가 가진 KB 후보 집합이 풍부해지면서 *실제로* per-item 라우팅이 작동하기 시작.
+
+**구현 위치**:
+- `src/core/kb/chain.ts` — `walkForKbsBelow` 헬퍼 신설, `MAX_DISCOVER_DEPTH` export.
+- `src/tools/discovery/get-kb-chain.ts` — walk-up + walk-down union, `walkForKbsBelowFn` deps 주입 추가.
+- `src/cli/start.ts` — 로컬 `walkForKbs` / `MAX_DISCOVER_DEPTH` 제거, core 에서 import.
+- `tests/tools/discovery/get-kb-chain.test.ts` — nested KB 발견 + chain 순서 + 단일 KB 회귀 케이스 추가.
+
+**KB 출력 영향**:
+- (개선) monorepo root cwd 세션: sub-app 파일을 touch 한 항목이 sub-app KB 로 정상 라우팅. "root 편중" 잔재 해소.
+- (회귀 0) 단일 KB / sub-app cwd 세션: 동작 동일 (walk-up 결과가 chain 의 dominant 부분).
+
 ### I-15. `harvest start` 기본 스코프에서 nested `.harvest/` 누락 — I-4 의 미완 꼬리
 
 **상태**: ✅ **resolved** (2026-04-28)
