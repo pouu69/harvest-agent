@@ -170,6 +170,17 @@ export interface ProcessedSession {
   session_id: string;
   /** Hex-encoded SHA-256 of the transcript. */
   transcript_sha256: string;
+  /**
+   * `stat.mtimeMs` (ms since epoch) of the transcript at record time.
+   * Used by `list_unprocessed_sessions` as a stat-only shortcut to skip
+   * read+hash on transcripts whose mtime hasn't changed (P-5). Append-only
+   * JSONL ⇒ `mtime` unchanged ⇒ contents identical ⇒ sha256 unchanged.
+   *
+   * `0` means "unknown" (legacy schema_version 1 entries promoted on read).
+   * The shortcut is disabled for `0`, falling back to read+hash. Once that
+   * read happens and the entry is re-stamped, the real mtime takes over.
+   */
+  transcript_mtime_ms: number;
   /** ISO 8601. */
   first_seen_at: string;
   /** ISO 8601. */
@@ -183,9 +194,13 @@ export interface ProcessedSession {
 
 /**
  * Full `processed.json` document.
+ *
+ * `schema_version: 2` adds `ProcessedSession.transcript_mtime_ms` (P-5).
+ * `readProcessed` accepts both 1 and 2 transparently; `writeProcessed`
+ * always emits 2.
  */
 export interface ProcessedJson {
-  schema_version: 1;
+  schema_version: 2;
   /** ISO 8601. */
   last_run: string;
   sessions: ProcessedSession[];

@@ -233,13 +233,58 @@ export async function listUnprocessedSessions(
       ? input.cwd_filter.map((p) => path.resolve(p))
       : undefined;
 
-  const candidates = await collectCandidates(transcriptDir);
+  // Per-KB processed.json cache so multi-KB chains don't re-read the same file.
+  const processedCache = new Map<string, ProcessedJson>();
+  const readProcCached = (kbPath: string): ProcessedJson | null => {
+    const hit = processedCache.get(kbPath);
+    if (hit !== undefined) return hit;
+    try {
+      const fresh = readProc(kbPath);
+      processedCache.set(kbPath, fresh);
+      return fresh;
+    } catch (err) {
+      // Corrupt ledger: callers fall back to the read+hash path, where
+      // isAlreadyProcessed (run from the cached fresh read attempt) would
+      // also return false — same safe direction.
+      if (err instanceof ProcessedSchemaError) return null;
+      throw err;
+    }
+  };
+
+  // P-5 stat shortcut: pre-build a `(session_id, mtime_ms)` set from every
+  // processed.json reachable through the configured scope. During the file
+  // walk, a `stat`-only match against this set lets us skip the per-file
+  // read+hash+JSONL parse path. Falls back transparently for misses, legacy
+  // `transcript_mtime_ms === 0` entries, and the no-scope case.
+  const shortcutMap = buildMtimeShortcut(
+    [
+      ...(discoverRoot !== undefined ? [discoverRoot] : []),
+      ...(cwdFilterRoots ?? []),
+    ],
+    findKb,
+    readProcCached,
+  );
+
+  const fileEntries = await enumerateJsonlFiles(transcriptDir);
 
   let skippedNoKb = 0;
   let skippedAlreadyProcessed = 0;
   let skippedOutOfScope = 0;
-  // Per-KB processed.json cache so multi-KB chains don't re-read the same file.
-  const processedCache = new Map<string, ProcessedJson>();
+  const candidates: (UnprocessedSession | null)[] = [];
+
+  for (const fe of fileEntries) {
+    const stem = path.basename(fe.path, ".jsonl");
+    const knownMtimes = shortcutMap.get(stem);
+    if (knownMtimes !== undefined && knownMtimes.has(fe.stat.mtimeMs)) {
+      // Append-only JSONL invariant: matching mtime ⇒ identical sha256 ⇒
+      // already processed. Skip the read entirely.
+      skippedAlreadyProcessed += 1;
+      continue;
+    }
+    candidates.push(
+      await readCandidate(fe.path, fe.hasSummarySibling, fe.stat),
+    );
+  }
 
   const survivors: UnprocessedSession[] = [];
 
@@ -262,21 +307,8 @@ export async function listUnprocessedSessions(
 
     let already = false;
     for (const kbPath of chain) {
-      let proc = processedCache.get(kbPath);
-      if (proc === undefined) {
-        try {
-          proc = readProc(kbPath);
-        } catch (err) {
-          // ProcessedSchemaError from a corrupt ledger is unusual but should
-          // not silently misclassify the session as "new". Treat the chain
-          // member as untrusted and continue with the others; if every KB
-          // fails, the session falls through to "not already processed",
-          // which is the safe direction (it'll show up so the user notices).
-          if (err instanceof ProcessedSchemaError) continue;
-          throw err;
-        }
-        processedCache.set(kbPath, proc);
-      }
+      const proc = readProcCached(kbPath);
+      if (proc === null) continue;
       if (isAlreadyProcessed(proc, cand.session_id, cand.sha256)) {
         already = true;
         break;
@@ -364,15 +396,22 @@ function resolveTranscriptDir(override?: string): string {
   return path.join(os.homedir(), ".claude", "projects");
 }
 
+interface JsonlFileEntry {
+  path: string;
+  stat: fs.Stats;
+  hasSummarySibling: boolean;
+}
+
 /**
- * Recursively walks `root`, returning candidate session entries (or `null`
- * when a candidate could not be parsed at all — empty file, no user/assistant
- * line, etc.).
+ * Recursively walks `root` and returns one entry per non-summary `*.jsonl`
+ * file with its `stat` snapshot and the `-summary` sibling flag. Stat is the
+ * cheapest read on the hot path — performing it here lets the caller decide
+ * whether the more expensive read+hash+parse is needed (P-5 stat shortcut).
+ * Files that cannot be `stat`'d are silently dropped (same lenient policy as
+ * the previous `collectCandidates`).
  */
-async function collectCandidates(
-  root: string,
-): Promise<(UnprocessedSession | null)[]> {
-  const out: (UnprocessedSession | null)[] = [];
+async function enumerateJsonlFiles(root: string): Promise<JsonlFileEntry[]> {
+  const out: JsonlFileEntry[] = [];
   const stack: string[] = [root];
 
   while (stack.length > 0) {
@@ -404,8 +443,56 @@ async function collectCandidates(
       const stem = e.name.slice(0, -".jsonl".length);
       if (stem.endsWith("-summary")) continue;
 
-      const cand = await readCandidate(full, summaryStems.has(stem));
-      out.push(cand);
+      let stat: fs.Stats;
+      try {
+        stat = await fsp.stat(full);
+      } catch {
+        continue;
+      }
+      out.push({
+        path: full,
+        stat,
+        hasSummarySibling: summaryStems.has(stem),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Build the `(session_id → mtime_ms set)` lookup used by the P-5 stat
+ * shortcut. Reads `processed.json` for every KB reachable from the configured
+ * scope (`discover_path` ∪ `cwd_filter`). Legacy entries with
+ * `transcript_mtime_ms === 0` (schema_version 1 promoted on read) are
+ * excluded — they signal "unknown mtime", and we want the read+hash fallback.
+ *
+ * Empty `scopePaths` ⇒ empty map ⇒ shortcut never fires (graceful fallback
+ * to today's behavior). The runner always seeds `cwd_filter`, so production
+ * runs always benefit; tests calling with neither flag opt out.
+ */
+function buildMtimeShortcut(
+  scopePaths: string[],
+  findKb: (cwd: string) => string[],
+  readProcCached: (kbPath: string) => ProcessedJson | null,
+): Map<string, Set<number>> {
+  const out = new Map<string, Set<number>>();
+  const kbsSeen = new Set<string>();
+  for (const sp of scopePaths) {
+    const chain = findKb(sp);
+    for (const kb of chain) {
+      if (kbsSeen.has(kb)) continue;
+      kbsSeen.add(kb);
+      const proc = readProcCached(kb);
+      if (proc === null) continue;
+      for (const s of proc.sessions) {
+        if (s.transcript_mtime_ms === 0) continue;
+        let bucket = out.get(s.session_id);
+        if (bucket === undefined) {
+          bucket = new Set<number>();
+          out.set(s.session_id, bucket);
+        }
+        bucket.add(s.transcript_mtime_ms);
+      }
     }
   }
   return out;
@@ -417,21 +504,23 @@ async function collectCandidates(
  * sha256 of the file, and stat metadata. Returns null if the file cannot be
  * parsed enough to produce a candidate (no parseable user/assistant line, no
  * sessionId, no cwd at all).
+ *
+ * `preStat` is the `Stats` snapshot from the enumeration pass — passed in
+ * so we don't `stat` the same file twice (the shortcut decision already used
+ * it). On read failure we fall back to returning null without re-stat'ing.
  */
 async function readCandidate(
   jsonlPath: string,
   hasSummarySibling: boolean,
+  preStat: fs.Stats,
 ): Promise<UnprocessedSession | null> {
   let buf: Buffer;
-  let stat: fs.Stats;
   try {
-    [buf, stat] = await Promise.all([
-      fsp.readFile(jsonlPath),
-      fsp.stat(jsonlPath),
-    ]);
+    buf = await fsp.readFile(jsonlPath);
   } catch {
     return null;
   }
+  const stat = preStat;
 
   const sha256 = createHash("sha256").update(buf).digest("hex");
   const text = buf.toString("utf-8");

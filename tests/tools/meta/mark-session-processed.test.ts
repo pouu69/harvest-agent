@@ -150,6 +150,28 @@ describe("markSessionProcessed (happy path)", () => {
     expect(onDisk.sessions[0]!.transcript_sha256).toBe(expectedSha);
   });
 
+  it("records transcript_mtime_ms (P-5 stat shortcut input)", async () => {
+    const kb = await mkKb("a");
+    const txPath = await writeTranscript("sess-mt");
+    // Pin the file's mtime so the assertion is deterministic.
+    const pinned = new Date("2026-04-25T12:34:56Z");
+    await fsp.utimes(txPath, pinned, pinned);
+
+    await markSessionProcessed(
+      {
+        session_id: "sess-mt",
+        status: "processed",
+        affected_kbs: [kb],
+        kb_actions: [],
+        extracted_count: 0,
+      },
+      { transcriptDir, nowIso: () => NOW },
+    );
+
+    const onDisk = readProcessed(kb);
+    expect(onDisk.sessions[0]!.transcript_mtime_ms).toBe(pinned.getTime());
+  });
+
   it("records skipped status with a skipped_reason", async () => {
     const kb = await mkKb("a");
     await writeTranscript("sess-1");

@@ -40,6 +40,7 @@ function makeSession(overrides: Partial<ProcessedSession> = {}): ProcessedSessio
   return {
     session_id: "sess-1",
     transcript_sha256: "a".repeat(64),
+    transcript_mtime_ms: 1714200000000,
     first_seen_at: "2026-04-26T12:00:00+09:00",
     last_seen_at: "2026-04-26T12:00:00+09:00",
     status: "processed",
@@ -59,7 +60,7 @@ describe("readProcessed", () => {
     const kb = await mkKb("a");
     const data = readProcessed(kb);
     expect(data).toEqual({
-      schema_version: 1,
+      schema_version: 2,
       last_run: "",
       sessions: [],
     });
@@ -74,17 +75,62 @@ describe("readProcessed", () => {
     expect(() => readProcessed(kb)).toThrow(ProcessedSchemaError);
   });
 
-  it("throws ProcessedSchemaError on schema_version mismatch", async () => {
+  it("throws ProcessedSchemaError on schema_version outside the supported set", async () => {
     const kb = await mkKb("a");
     const file = path.join(kb, ".state", "processed.json");
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(
       file,
-      JSON.stringify({ schema_version: 2, last_run: "", sessions: [] }),
+      JSON.stringify({ schema_version: 99, last_run: "", sessions: [] }),
       "utf-8",
     );
 
     expect(() => readProcessed(kb)).toThrow(ProcessedSchemaError);
+  });
+
+  it("accepts legacy schema_version 1 and promotes entries with transcript_mtime_ms = 0", async () => {
+    const kb = await mkKb("a");
+    const file = path.join(kb, ".state", "processed.json");
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    // Legacy v1 entry — no transcript_mtime_ms field on disk.
+    await fsp.writeFile(
+      file,
+      JSON.stringify({
+        schema_version: 1,
+        last_run: "2026-04-26T11:00:00+09:00",
+        sessions: [
+          {
+            session_id: "old",
+            transcript_sha256: "h",
+            first_seen_at: "2026-04-26T10:00:00+09:00",
+            last_seen_at: "2026-04-26T10:00:00+09:00",
+            status: "processed",
+            skipped_reason: null,
+            extracted_count: 0,
+            kb_actions: [],
+            failure_reason: null,
+          },
+        ],
+      }),
+      "utf-8",
+    );
+
+    const back = readProcessed(kb);
+    expect(back.schema_version).toBe(2);
+    expect(back.sessions).toHaveLength(1);
+    expect(back.sessions[0]!.transcript_mtime_ms).toBe(0);
+  });
+
+  it("schema_version 1 missing field set passes — only the version literal differs", async () => {
+    const kb = await mkKb("a");
+    const file = path.join(kb, ".state", "processed.json");
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(
+      file,
+      JSON.stringify({ schema_version: 1, last_run: "", sessions: [] }),
+      "utf-8",
+    );
+    expect(() => readProcessed(kb)).not.toThrow();
   });
 
   it("throws ProcessedSchemaError when top-level is not an object", async () => {
@@ -102,7 +148,7 @@ describe("readProcessed", () => {
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(
       file,
-      JSON.stringify({ schema_version: 1, last_run: "", sessions: {} }),
+      JSON.stringify({ schema_version: 2, last_run: "", sessions: {} }),
       "utf-8",
     );
 
@@ -115,7 +161,7 @@ describe("readProcessed", () => {
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(
       file,
-      JSON.stringify({ schema_version: 1, last_run: 0, sessions: [] }),
+      JSON.stringify({ schema_version: 2, last_run: 0, sessions: [] }),
       "utf-8",
     );
 
@@ -127,7 +173,7 @@ describe("writeProcessed", () => {
   it("writes to <kb>/.state/processed.json, creating .state/ if missing", async () => {
     const kb = await mkKb("a");
     const data: ProcessedJson = {
-      schema_version: 1,
+      schema_version: 2,
       last_run: "",
       sessions: [makeSession()],
     };
@@ -136,7 +182,7 @@ describe("writeProcessed", () => {
     const file = path.join(kb, ".state", "processed.json");
     const txt = await fsp.readFile(file, "utf-8");
     const parsed = JSON.parse(txt) as ProcessedJson;
-    expect(parsed.schema_version).toBe(1);
+    expect(parsed.schema_version).toBe(2);
     expect(parsed.last_run).toBe(NOW);
     expect(parsed.sessions).toHaveLength(1);
   });
@@ -144,10 +190,10 @@ describe("writeProcessed", () => {
   it("round-trips: write then read returns equivalent data", async () => {
     const kb = await mkKb("a");
     const sessions = [makeSession({ session_id: "s1" }), makeSession({ session_id: "s2" })];
-    await writeProcessed(kb, { schema_version: 1, last_run: "", sessions }, NOW);
+    await writeProcessed(kb, { schema_version: 2, last_run: "", sessions }, NOW);
 
     const back = readProcessed(kb);
-    expect(back.schema_version).toBe(1);
+    expect(back.schema_version).toBe(2);
     expect(back.last_run).toBe(NOW);
     expect(back.sessions).toEqual(sessions);
   });
@@ -156,7 +202,7 @@ describe("writeProcessed", () => {
     const kb = await mkKb("a");
     await writeProcessed(
       kb,
-      { schema_version: 1, last_run: "stale-value", sessions: [] },
+      { schema_version: 2, last_run: "stale-value", sessions: [] },
       NOW,
     );
     expect(readProcessed(kb).last_run).toBe(NOW);
@@ -166,7 +212,7 @@ describe("writeProcessed", () => {
 describe("isAlreadyProcessed", () => {
   it("returns true on (id, sha256) match", () => {
     const data: ProcessedJson = {
-      schema_version: 1,
+      schema_version: 2,
       last_run: "",
       sessions: [makeSession({ session_id: "x", transcript_sha256: "h1" })],
     };
@@ -175,7 +221,7 @@ describe("isAlreadyProcessed", () => {
 
   it("returns false when sha256 differs", () => {
     const data: ProcessedJson = {
-      schema_version: 1,
+      schema_version: 2,
       last_run: "",
       sessions: [makeSession({ session_id: "x", transcript_sha256: "h1" })],
     };
@@ -184,7 +230,7 @@ describe("isAlreadyProcessed", () => {
 
   it("returns false for unknown session_id", () => {
     const data: ProcessedJson = {
-      schema_version: 1,
+      schema_version: 2,
       last_run: "",
       sessions: [makeSession({ session_id: "x", transcript_sha256: "h1" })],
     };
@@ -192,13 +238,13 @@ describe("isAlreadyProcessed", () => {
   });
 
   it("returns false on empty sessions", () => {
-    const data: ProcessedJson = { schema_version: 1, last_run: "", sessions: [] };
+    const data: ProcessedJson = { schema_version: 2, last_run: "", sessions: [] };
     expect(isAlreadyProcessed(data, "x", "h1")).toBe(false);
   });
 });
 
 describe("upsertSession", () => {
-  const empty: ProcessedJson = { schema_version: 1, last_run: "", sessions: [] };
+  const empty: ProcessedJson = { schema_version: 2, last_run: "", sessions: [] };
 
   it("appends with first_seen_at = last_seen_at = nowIso for new id", () => {
     const incoming = makeSession({
@@ -225,7 +271,7 @@ describe("upsertSession", () => {
       failure_reason: null,
     });
     const data: ProcessedJson = {
-      schema_version: 1,
+      schema_version: 2,
       last_run: "",
       sessions: [original],
     };
@@ -259,7 +305,7 @@ describe("upsertSession", () => {
       last_seen_at: "2026-01-01T00:00:00+09:00",
     });
     const data: ProcessedJson = {
-      schema_version: 1,
+      schema_version: 2,
       last_run: "",
       sessions: [original],
     };
@@ -282,7 +328,7 @@ describe("upsertSession", () => {
   it("does not mutate the input data", () => {
     const original = makeSession({ session_id: "s1", transcript_sha256: "h1" });
     const data: ProcessedJson = {
-      schema_version: 1,
+      schema_version: 2,
       last_run: "",
       sessions: [original],
     };
@@ -368,7 +414,7 @@ describe("markSessionAcrossKbs", () => {
     await writeProcessed(
       kbA,
       {
-        schema_version: 1,
+        schema_version: 2,
         last_run: "",
         sessions: [makeSession({ session_id: "old", transcript_sha256: "old-h" })],
       },

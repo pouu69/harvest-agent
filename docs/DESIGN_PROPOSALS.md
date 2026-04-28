@@ -95,6 +95,41 @@
 
 ---
 
+## P-5. `list_unprocessed_sessions` mtime-based stat shortcut — 🟠 **수락 (별도 task)**
+
+**제안 (사용자, 2026-04-28)**: 매 `harvest start` 마다 `~/.claude/projects/` 의 모든 `*.jsonl` 을 통째로 read + sha256 + JSONL parse 한 다음 `processed.json` 과 대조하는 동작이 비효율. 이미 처리된 transcript 는 stat 만 보고 skip 할 수 있어야 함.
+
+**현재 동작 (`src/tools/discovery/list-unprocessed-sessions.ts:236-296, 421-502`)**:
+1. 디렉토리 walk → 모든 `.jsonl` 수집
+2. 각 파일 `fsp.readFile` (전체 buffer) + sha256 + JSONL line-by-line parse 로 `session_id` / cwd histogram 추출
+3. KB chain / `processed.json` 으로 필터
+
+→ N 개 transcript 가 있고 신규가 2 개여도 N 번의 read + parse + hash. 사용자 backlog 가 쌓일수록 첫 단계 비용이 선형 증가.
+
+**유효성**: Claude Code transcript 는 **append-only JSONL** — 한 세션이 진행되면 같은 파일에 라인이 추가되고 `mtime` 이 갱신된다. 즉 **mtime 동일 ⇒ 내용 동일 ⇒ sha256 동일** 이 invariant 로 성립. `processed.json` 에 마지막 처리 시점의 `mtime_ms` 를 함께 적어두면, 후보 walk 시 `stat` 만 하고 mtime 매치인 파일은 read+parse+hash 를 통째로 건너뛸 수 있다.
+
+**채택안**: `ProcessedSession` 에 `transcript_mtime_ms: number` 추가, `processed.json.schema_version` 1 → 2 bump. `list_unprocessed_sessions` 의 `collectCandidates` 단계에서:
+1. 먼저 KB chain 의 `processed.json` 들을 union 으로 읽어 `(session_id-stem, mtime_ms)` 매핑을 만든다.
+2. 디렉토리 walk 에서 각 파일을 `stat` 만 하고, 파일명 stem(= sessionId, Claude Code 가 `<sessionId>.jsonl` 형식으로 저장) + mtime 이 매핑에 있으면 read+hash 스킵 → "이미 처리됨" 으로 분류.
+3. 미스 / 신규 파일만 기존 경로(read + hash + parse)로 진행.
+
+**호환성**:
+- **스키마 마이그레이션**: 기존 `processed.json` (schema_version: 1) 은 mtime 필드 없음 → 매핑에 등재 안 되어 자연스럽게 기존 경로(read + hash) fallback. 한 번 처리되면 schema_version 2 로 재기록되며 다음 실행부터 shortcut 적용. 전용 마이그레이션 코드 불필요.
+- **idempotency invariant 유지**: shortcut 은 *비용 절감* 목적이고 sha256 검증 자체는 미스 / 신규 파일에서 그대로 작동. 외부 도구가 `touch` 로 mtime 만 갱신해 false-negative 가 나는 시나리오는 사용자가 직접 한 이상 행위 — 이 경우에만 한 세션이 새로 추출 후보로 다시 등장 (false positive on the safe direction).
+- **§9.3 line 1062 "sha256 변경된 transcript 도 미처리로 분류"**: 변하지 않음 (mtime 변경 ⇒ sha256 재계산 경로로 흐름).
+- **`mark_session_processed` (§9.6)**: 기록 시 `transcript_mtime_ms` 도 함께 stat 해서 적도록 도구 시그니처 확장.
+
+**spec 영향**:
+- §9.3 의 알고리즘 단계에 "stat-mtime shortcut" 한 줄 추가 (선택적 단축, 의미는 동일).
+- §11.1 의 `ProcessedSession` 스키마에 `transcript_mtime_ms: number` 추가 + `schema_version: 2` 변경 노트.
+- §11.2 멱등성 정책 본문은 그대로 — invariant 가 유지됨을 명시만 추가.
+
+**적용 시점**: 별도 task (T-N). 변경 영역: `src/core/types.ts` (스키마), `src/core/processed.ts` (read/write + schema_version 처리), `src/tools/discovery/list-unprocessed-sessions.ts` (shortcut 경로), `src/tools/meta/mark-session-processed.ts` (mtime 기록), 관련 단위 테스트.
+
+**관련 SPEC_DEFECTS**: 새 ID (다음 가용 번호) 로 "list_unprocessed_sessions full-rescan 비효율" 등록 검토.
+
+---
+
 ## 향후 추가 시 양식
 
 새 제안은 P-N (Proposal-N) 으로 단조 증가. 각 항목은:

@@ -28,7 +28,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -169,9 +169,11 @@ export async function markSessionProcessed(
     };
   }
 
-  // 4. Re-hash from disk (stateless per §9.6 line 1704).
+  // 4. Re-hash from disk (stateless per §9.6 line 1704). Also capture mtime
+  //    for the §11.1 v2 stat shortcut used by `list_unprocessed_sessions`.
   const fileBytes = readFileSync(transcriptPath);
   const sha256 = createHash("sha256").update(fileBytes).digest("hex");
+  const mtimeMs = statSync(transcriptPath).mtimeMs;
 
   // 5. Compose ProcessedSession. `kb_path` (input) → `kb` (storage) per types.ts.
   // first_seen_at is stateless here; upsertSession preserves an earlier value
@@ -186,6 +188,7 @@ export async function markSessionProcessed(
   const session: ProcessedSession = {
     session_id: data.session_id,
     transcript_sha256: sha256,
+    transcript_mtime_ms: mtimeMs,
     first_seen_at: recordedAt,
     last_seen_at: recordedAt,
     status: data.status,

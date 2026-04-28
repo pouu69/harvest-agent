@@ -97,7 +97,7 @@ describe("listUnprocessedSessions", () => {
         transcriptDir: txDir,
         findKbChainFn: () => [],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -119,12 +119,13 @@ describe("listUnprocessedSessions", () => {
     const sha = createHash("sha256").update(buf).digest("hex");
 
     const proc: ProcessedJson = {
-      schema_version: 1,
+      schema_version: 2,
       last_run: "2026-04-26T11:00:00+09:00",
       sessions: [
         {
           session_id: sid,
           transcript_sha256: sha,
+          transcript_mtime_ms: 0,
           first_seen_at: "2026-04-26T10:00:00+09:00",
           last_seen_at: "2026-04-26T10:00:00+09:00",
           status: "processed",
@@ -172,7 +173,7 @@ describe("listUnprocessedSessions", () => {
         transcriptDir: txDir,
         findKbChainFn: () => ["/work/p/.harvest"],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -201,7 +202,7 @@ describe("listUnprocessedSessions", () => {
         transcriptDir: txDir,
         findKbChainFn: () => ["/work/p/.harvest"],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -235,7 +236,7 @@ describe("listUnprocessedSessions", () => {
         // outside one is `discover_path`.
         findKbChainFn: (cwd) => [path.join(cwd, ".harvest")],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -265,7 +266,7 @@ describe("listUnprocessedSessions", () => {
         transcriptDir: txDir,
         findKbChainFn: (cwd) => [path.join(cwd, ".harvest")],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -300,7 +301,7 @@ describe("listUnprocessedSessions", () => {
         transcriptDir: txDir,
         findKbChainFn: (cwd) => [path.join(cwd, ".harvest")],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -330,7 +331,7 @@ describe("listUnprocessedSessions", () => {
         transcriptDir: txDir,
         findKbChainFn: (cwd) => [path.join(cwd, ".harvest")],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -367,7 +368,7 @@ describe("listUnprocessedSessions", () => {
             : [];
         },
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -393,7 +394,7 @@ describe("listUnprocessedSessions", () => {
         transcriptDir: txDir,
         findKbChainFn: () => ["/work/p/.harvest"],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -426,7 +427,7 @@ describe("listUnprocessedSessions", () => {
         transcriptDir: txDir,
         findKbChainFn: () => ["/work/p/.harvest"],
         readProcessedFn: () => ({
-          schema_version: 1,
+          schema_version: 2,
           last_run: "",
           sessions: [],
         }),
@@ -458,7 +459,7 @@ describe("listUnprocessedSessions", () => {
       transcriptDir: txDir,
       findKbChainFn: () => ["/work/p/.harvest"],
       readProcessedFn: () => ({
-        schema_version: 1,
+        schema_version: 2,
         last_run: "",
         sessions: [],
       }),
@@ -482,12 +483,144 @@ describe("listUnprocessedSessions", () => {
       transcriptDir: txDir,
       findKbChainFn: () => ["/work/p/.harvest"],
       readProcessedFn: () => ({
-        schema_version: 1,
+        schema_version: 2,
         last_run: "",
         sessions: [],
       }),
     });
     if ("error" in out) throw new Error("unexpected error");
     expect(out.sessions.map((s) => s.session_id)).toEqual(["a"]);
+  });
+
+  // --- P-5 stat shortcut --------------------------------------------------
+
+  it("stat shortcut: matching mtime in processed.json skips read+hash", async () => {
+    const txDir = path.join(root, "tx");
+    const proj = path.join(root, "proj");
+    await fsp.mkdir(proj, { recursive: true });
+    const tx = path.join(txDir, "sess-fast.jsonl");
+    await writeJsonl(tx, { sessionId: "sess-fast", cwd: proj });
+    const stat = await fsp.stat(tx);
+    const mtimeMs = stat.mtimeMs;
+
+    let readProcCalls = 0;
+    const out = await listUnprocessedSessions(
+      { limit: 20, cwd_filter: [proj] },
+      {
+        transcriptDir: txDir,
+        findKbChainFn: () => [path.join(proj, ".harvest")],
+        readProcessedFn: () => {
+          readProcCalls += 1;
+          return {
+            schema_version: 2,
+            last_run: "",
+            sessions: [
+              {
+                session_id: "sess-fast",
+                // sha256 deliberately wrong — shortcut should fire on
+                // (session_id, mtime) alone and never compute the hash.
+                transcript_sha256: "wrong",
+                transcript_mtime_ms: mtimeMs,
+                first_seen_at: "2026-04-26T10:00:00+09:00",
+                last_seen_at: "2026-04-26T10:00:00+09:00",
+                status: "processed",
+                skipped_reason: null,
+                extracted_count: 0,
+                kb_actions: [],
+                failure_reason: null,
+              },
+            ],
+          };
+        },
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    expect(out.sessions).toHaveLength(0);
+    expect(out.skipped_already_processed).toBe(1);
+    // The shortcut prebuild reads each scope-KB's processed.json once.
+    expect(readProcCalls).toBe(1);
+  });
+
+  it("stat shortcut: mtime mismatch falls through to read+hash", async () => {
+    const txDir = path.join(root, "tx");
+    const proj = path.join(root, "proj");
+    await fsp.mkdir(proj, { recursive: true });
+    const tx = path.join(txDir, "sess-changed.jsonl");
+    await writeJsonl(tx, { sessionId: "sess-changed", cwd: proj });
+
+    const out = await listUnprocessedSessions(
+      { limit: 20, cwd_filter: [proj] },
+      {
+        transcriptDir: txDir,
+        findKbChainFn: () => [path.join(proj, ".harvest")],
+        readProcessedFn: () => ({
+          schema_version: 2,
+          last_run: "",
+          sessions: [
+            {
+              session_id: "sess-changed",
+              transcript_sha256: "h-old",
+              // Stale mtime — file has since been appended to.
+              transcript_mtime_ms: 1,
+              first_seen_at: "2026-04-26T10:00:00+09:00",
+              last_seen_at: "2026-04-26T10:00:00+09:00",
+              status: "processed",
+              skipped_reason: null,
+              extracted_count: 0,
+              kb_actions: [],
+              failure_reason: null,
+            },
+          ],
+        }),
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    // Shortcut declines; full read runs; sha256 differs from "h-old" so the
+    // session is reported as new.
+    expect(out.sessions.map((s) => s.session_id)).toEqual(["sess-changed"]);
+  });
+
+  it("stat shortcut: legacy entries (transcript_mtime_ms = 0) never short-circuit", async () => {
+    const txDir = path.join(root, "tx");
+    const proj = path.join(root, "proj");
+    await fsp.mkdir(proj, { recursive: true });
+    const tx = path.join(txDir, "sess-legacy.jsonl");
+    await writeJsonl(tx, { sessionId: "sess-legacy", cwd: proj });
+    // Touch mtime to exactly 0 — pathological but explicit; the shortcut
+    // should still decline because the recorded mtime is 0 (= "unknown").
+    const buf = await fsp.readFile(tx);
+    const { createHash } = await import("node:crypto");
+    const realSha = createHash("sha256").update(buf).digest("hex");
+
+    const out = await listUnprocessedSessions(
+      { limit: 20, cwd_filter: [proj] },
+      {
+        transcriptDir: txDir,
+        findKbChainFn: () => [path.join(proj, ".harvest")],
+        readProcessedFn: () => ({
+          schema_version: 2,
+          last_run: "",
+          sessions: [
+            {
+              session_id: "sess-legacy",
+              transcript_sha256: realSha,
+              transcript_mtime_ms: 0, // legacy promoted entry
+              first_seen_at: "2026-04-26T10:00:00+09:00",
+              last_seen_at: "2026-04-26T10:00:00+09:00",
+              status: "processed",
+              skipped_reason: null,
+              extracted_count: 0,
+              kb_actions: [],
+              failure_reason: null,
+            },
+          ],
+        }),
+      },
+    );
+    if ("error" in out) throw new Error("unexpected error");
+    // Read+hash runs; sha matches the legacy entry → counted via the regular
+    // already-processed path, not the shortcut.
+    expect(out.sessions).toHaveLength(0);
+    expect(out.skipped_already_processed).toBe(1);
   });
 });

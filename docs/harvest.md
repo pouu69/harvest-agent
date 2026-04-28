@@ -1057,9 +1057,10 @@ z.object({
 
 **동작**: 결정론.
 1. `~/.claude/projects/` 스캔 → summary jsonl 제외
-2. 각 transcript의 첫 user 메시지에서 cwd 추출 (= dominant cwd, §9.3 sessions[].cwd 정의와 일치)
-3. **`findKbChain(cwd)` 호출 → 빈 배열이면 결과 목록에서 제외** (no-kb-found 사전 필터, §5.1 알고리즘 기준)
-4. 남은 후보들을 모든 후보 KB의 `processed.json`과 대조하여 미처리 추출 (sha256 변경된 transcript도 미처리로 분류 — §11.2 멱등성 정책)
+2. **stat shortcut (§11.1 v2 / P-5)**: 호출 전에 `cwd_filter` / `discover_path` scope의 모든 KB에서 `processed.json`을 union으로 읽어 `(session_id → mtime_ms set)` 매핑을 만든다. walk 단계에서 각 `.jsonl`을 stat만 하고 파일명 stem(=session_id 가정) + `stat.mtimeMs`가 매핑에 있으면 read+hash+JSONL parse를 통째로 건너뛰고 "이미 처리됨"으로 카운트. 미스 / scope 비어있음 / 매핑 mtime이 0이면 다음 단계로 진행.
+3. 각 transcript의 dominant cwd 추출 (§9.3 sessions[].cwd 정의와 일치)
+4. **`findKbChain(cwd)` 호출 → 빈 배열이면 결과 목록에서 제외** (no-kb-found 사전 필터, §5.1 알고리즘 기준)
+5. 남은 후보들을 모든 후보 KB의 `processed.json`과 대조하여 미처리 추출 (sha256 변경된 transcript도 미처리로 분류 — §11.2 멱등성 정책)
 
 KB 없는 cwd의 session은 Agent에게 노출되지 않는다. 따라서 ROUTE 단계에서 `kb_chain_empty`를 만나는 일은 사실상 없다 (드문 escape: 첫 cwd 이후 cd로 KB 영역을 벗어난 케이스 등). 이 사전 필터는 *어디에도 기록할 KB가 없는 session이 매 실행마다 재발견되어 Agent turn을 낭비*하는 문제를 차단한다.
 
@@ -1948,12 +1949,13 @@ Anthropic 의 경우 Opus 는 Agent 에 권장 안 함 — 비용 대비 효과 
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "last_run": "ISO8601",
   "sessions": [
     {
       "session_id": "string",
       "transcript_sha256": "string (hex)",
+      "transcript_mtime_ms": "number (ms since epoch, P-5)",
       "first_seen_at": "ISO8601",
       "last_seen_at": "ISO8601",
       "status": "processed" | "skipped" | "failed",
@@ -1971,6 +1973,10 @@ Anthropic 의 경우 Opus 는 Agent 에 권장 안 함 — 비용 대비 효과 
 }
 ```
 
+**`schema_version`**: 2 (current). 1은 legacy — `transcript_mtime_ms`가 없는 entry. reader는 두 버전 모두 수용하며, v1을 읽을 때 `transcript_mtime_ms = 0` ("unknown")으로 promote 한다 (P-5). writer는 항상 v2로 출력. 마이그레이션 전용 코드는 두지 않는다 — 한 번 재처리/재기록되면 자연스럽게 v2로 수렴.
+
+**`transcript_mtime_ms`**: 기록 시점 transcript 파일의 `stat.mtimeMs`. `list_unprocessed_sessions`의 stat shortcut(§9.3)이 read+hash를 건너뛰어도 되는지 판단하는 입력. append-only JSONL invariant ⇒ mtime 동일 = 내용 동일 = sha256 동일. `0`은 "unknown" 신호로, shortcut을 비활성화하고 read+hash 경로로 fallback 시킨다.
+
 ### 11.2 멱등성 보장
 
 - session_id 매칭만으로는 부족 (transcript가 변경됐을 수 있음 — 예: session resume)
@@ -1978,6 +1984,8 @@ Anthropic 의 경우 Opus 는 Agent 에 권장 안 함 — 비용 대비 효과 
 - 둘 중 하나라도 다르면 **재처리**:
   - sha256만 다른 경우 (transcript 변경/이어가기) → 재처리하되, RECONCILE 단계가 *기존 항목을 보고* 머지하므로 중복 항목은 자연 방지
   - session_id가 새것 → 새 entry로 추가
+
+**stat shortcut (§11.1 v2, P-5)**: `(session_id, sha256)` invariant 자체는 그대로다. `list_unprocessed_sessions`가 read+hash를 *수행하기 전에* `(session_id, transcript_mtime_ms)`로 조기 매칭하는 단축경로를 추가했을 뿐이다. mtime 매치 = (append-only invariant 가정 하에) 내용 동일 = sha256 동일이 보장되므로 "이미 처리됨"으로 분류해도 안전. 매치 실패 / mtime이 0 / scope에 KB가 없으면 기존 read+hash 경로로 그대로 떨어진다.
 
 ### 11.3 다중 KB 영향 시 processed.json 기록
 
@@ -3438,6 +3446,7 @@ function validateAndNormalize(items: any[]): CandidateItem[] {
 | 2.1 | 2026-04-26 | v2.0 검토 반영 (14건). **버그 수정 (3건)**: §10.1의 `systemPromptType: "custom"` 무효 옵션 삭제 (SDK는 systemPrompt에 string 직접 또는 preset 객체만 받음), §9.3 get_kb_chain의 `multi_kb_session_risk` 의미 무효 필드 제거 (multi-kb-session 판정은 read_transcript의 is_multi_cwd가 담당), §9.5 promote_item Zod 스키마에 origin_items 길이 제약 superRefine 추가 (promote ≥ 2 + 서로 다른 KB, demote == 1). **모호성 해소 (6건)**: create_item region_violation 조건을 "처음부터 빈 paths" vs "정규화 후 0"으로 명확화, extract_items_from_transcript의 cost estimate 계산 방법 명시 (Agent SDK ResultMessage의 total_cost_usd), mark_session_processed의 sha256은 transcript 파일 재해시(stateless), §8 시스템 프롬프트의 EXTRACT 방법 A/B 결정에서 토큰 추정 출처 명시 (read_transcript의 estimated_tokens), §8.4 예외 표에서 `kb_locked` 제거 (lock 충돌은 Agent 시작 전이라 도달 불가), extract_items_from_transcript description의 v1.x 참조 제거 (자체 완결). **일관성/품질 (5건)**: promote_item universality 자동 결정 별도 강조 블록, §16.3.2 max_turns_used 단일 단언 → p95/max 통계 표현, §10.1 mcpServers/allowedTools 네이밍 규약 (`mcp__harvest__*`) 명시 + 도구 13개 상수 코드 추가, §17 v2.0 미해결 항목 신설 (prompt cache 적중률, max_turns 도달 우선순위, live LLM 비용, 무한 루프 패턴 감지, 보조 LLM 모델 영향). **§19 갱신**: 21단계 파이프라인 → 22단계 4-Phase (기초 인프라 / 도구 구현 / Agent 통합 / 안정성). MVP 경계 명시. |
 | 2.2 | 2026-04-26 | 구현 관점 검토 반영 (11건). **Critical (2건)**: §18.6 신설 — extract_items_from_transcript 도구 내부 보조 LLM의 시스템 프롬프트 전문 (한국어, production-ready) + 유저 프롬프트 빌더 + 9단계 출력 검증 코드. v1.3 §8.5.2 내용을 v2.0 구조에 맞게 재배치 (이전 §14.1의 "v1.x §8.5.2 참조" 끊긴 링크 해소). §14.2 프로젝트 구조 v2.0 4-layer로 전면 재작성 — `src/core/pipeline/` 10단계 잔재 제거, `src/llm/prompts/` 5개 분리 프롬프트 잔재 제거, `src/agent/`와 `src/tools/` 4개 그룹 신설. 의존 방향 명시 (CLI → Agent → Tools → Core). **Significant (4건)**: read_transcript의 sessions-index.json 정체 명시 (Claude Code v2.0+ 선택적 생성 파일, 존재 시 활용 + fallback 명시), find_similar_items의 Levenshtein 결정 (직접 구현 30줄, 외부 라이브러리 X), §10.3 handleMessage 정밀화 (SDK 메시지 타입별 의사코드, report_progress intercept는 도구 핸들러의 직접 stdout 출력으로 단순화), §15.1 에러 카테고리 v2.0 4-layer 기반으로 재분류 (CLI/Agent/Tool/보조 LLM/Core 각각 처리). **부록 추가**: §18.7 Minimal transcript JSONL 예시 3종 (trivial, anti-pattern, multi-cwd). **빌드/CLI 디테일 (3건)**: §14.4 신설 — tsconfig/tsup/vitest 설정 표준 코드, §14.5 신설 — argv 파싱 (CLI 라이브러리 없이 ~30줄), §14.6 신설 — atomic-write 패턴 (temp + rename, 같은 fs 가정). |
 | 2.3 | 2026-04-27 | **`list_unprocessed_sessions` 사전 필터 (옵션 A)**. KB 체인이 빈 cwd의 session을 탐색 단계에서 즉시 제외하여 Agent에게 노출되지 않게 함. **해소된 결함**: 기존 사양에서 KB 없는 session은 ROUTE에서 `mark_session_processed(no-kb-found)` 호출했지만 `affected_kbs=[]`라 어디에도 기록되지 못해 *매 실행마다 재발견되어 ROUTE → skip을 반복*하는 멱등성 결함이 있었음. §9.3 동작에 cwd → `findKbChain` 사전 검사 추가, 반환에 `skipped_no_kb` 카운트 추가, `kb_chain_empty` suggest 갱신. §8.2 ROUTE 단계와 §8.3 흐름도에서 "KB 없음" 케이스를 escape only로 격하 (mark_session_processed 호출 안 함). **부수: 스키마 불일치 수정**: §9.6 mark_session_processed `skipped_reason` enum에서 `no-kb-found` 제거 (사전 필터로 발생 불가). §11.1 processed.json `skipped_reason` enum을 §9.6과 일치시킴 (`trivial-deterministic` → `trivial`, `low-value-llm` → `low-value`, `transcript-corrupt`/`other` 추가). |
+| 2.4 | 2026-04-28 | **processed.json `schema_version: 2` (P-5 stat shortcut)**. `ProcessedSession`에 `transcript_mtime_ms` 추가. `list_unprocessed_sessions`가 매 실행마다 모든 transcript를 통째 read+hash 하던 동작을 단축 — `cwd_filter`/`discover_path` scope의 `processed.json` union에서 `(session_id → mtime_ms)` 매핑을 만든 뒤, walk 단계에서 `stat`만 보고 mtime 매치인 파일은 read+hash+JSONL parse를 건너뛴다. invariant: append-only JSONL ⇒ mtime 동일 = sha256 동일. v1 reader 호환 유지 (read 시 `transcript_mtime_ms = 0`으로 promote, 다음 re-stamp에서 v2로 자연 수렴). 영향: §9.3 동작 단계에 stat shortcut 단계 추가, §11.1 schema 1→2 + mtime 필드, §11.2에 shortcut 안전성 노트, `mark_session_processed`가 기록 시 `statSync(transcriptPath).mtimeMs`를 함께 저장. |
 
 ---
 

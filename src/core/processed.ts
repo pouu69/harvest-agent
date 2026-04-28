@@ -57,7 +57,15 @@ export class ProcessedSchemaError extends Error {
   }
 }
 
-const CURRENT_SCHEMA_VERSION = 1 as const;
+const CURRENT_SCHEMA_VERSION = 2 as const;
+/**
+ * Versions accepted by {@link readProcessed}. v1 entries lack
+ * `transcript_mtime_ms`; we fill it with `0` (= "unknown") so the stat
+ * shortcut in `list_unprocessed_sessions` simply doesn't trigger for them.
+ * The next time the session is re-stamped via `mark_session_processed`, the
+ * real mtime is recorded and the shortcut takes effect from then on.
+ */
+const SUPPORTED_SCHEMA_VERSIONS = [1, 2] as const;
 
 /**
  * Returns the on-disk path of a KB's `processed.json`.
@@ -114,12 +122,17 @@ export function readProcessed(kbPath: string): ProcessedJson {
     );
   }
 
-  if (parsed.schema_version !== CURRENT_SCHEMA_VERSION) {
+  if (
+    !SUPPORTED_SCHEMA_VERSIONS.includes(
+      parsed.schema_version as typeof SUPPORTED_SCHEMA_VERSIONS[number],
+    )
+  ) {
     throw new ProcessedSchemaError(
-      `processed.json schema_version mismatch: expected ${CURRENT_SCHEMA_VERSION}, got ${JSON.stringify(parsed.schema_version)}`,
+      `processed.json schema_version mismatch: expected one of ${JSON.stringify(SUPPORTED_SCHEMA_VERSIONS)}, got ${JSON.stringify(parsed.schema_version)}`,
       { filePath },
     );
   }
+  const onDiskVersion = parsed.schema_version as 1 | 2;
 
   if (typeof parsed.last_run !== "string") {
     throw new ProcessedSchemaError(
@@ -135,13 +148,22 @@ export function readProcessed(kbPath: string): ProcessedJson {
     );
   }
 
-  // We trust per-entry shape at this layer — entries originate from
-  // upsertSession in this same module. Defending against hand-edited entries
-  // would require a runtime schema validator we don't currently have.
+  // Promote v1 entries: fill `transcript_mtime_ms` with 0 ("unknown") so the
+  // stat shortcut declines them and the existing read+hash path runs. The next
+  // re-stamp records the real mtime and the shortcut activates from then on.
+  // v2 entries pass through unchanged.
+  const sessions =
+    onDiskVersion === 1
+      ? (parsed.sessions as ProcessedSession[]).map((s) => ({
+          ...s,
+          transcript_mtime_ms: (s as { transcript_mtime_ms?: number }).transcript_mtime_ms ?? 0,
+        }))
+      : (parsed.sessions as ProcessedSession[]);
+
   return {
     schema_version: CURRENT_SCHEMA_VERSION,
     last_run: parsed.last_run,
-    sessions: parsed.sessions as ProcessedSession[],
+    sessions,
   };
 }
 
@@ -231,6 +253,10 @@ export function upsertSession(
     sessions[matchIdx] = {
       session_id: existing.session_id,
       transcript_sha256: existing.transcript_sha256,
+      // Take the incoming mtime — caller has just stat'd the file so it's the
+      // authoritative current value. Even on a no-content-change re-stamp the
+      // mtime can have been refreshed by a benign touch; we trust the caller.
+      transcript_mtime_ms: session.transcript_mtime_ms,
       first_seen_at: existing.first_seen_at,
       last_seen_at: nowIso,
       status: session.status,
@@ -246,6 +272,7 @@ export function upsertSession(
     sessions.push({
       session_id: session.session_id,
       transcript_sha256: session.transcript_sha256,
+      transcript_mtime_ms: session.transcript_mtime_ms,
       first_seen_at: nowIso,
       last_seen_at: nowIso,
       status: session.status,
