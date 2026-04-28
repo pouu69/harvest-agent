@@ -87,7 +87,7 @@
 - `harvest start` CLI 표면: `--provider <anthropic|openai|google>` flag 추가, env: `HARVEST_PROVIDER` + provider별 API 키.
 - `harvest.md` §10.5, §12.2, §16.4 표현 일반화 ("Agent SDK self-error" → "LLM provider self-error").
 
-**적용 시점**: 별도 PLAN 문서 — [`PLAN_MULTI_PROVIDER.md`](./PLAN_MULTI_PROVIDER.md) — 5 phase 로 나눠서 단계별 머지. 각 phase 끝마다 typecheck + test + lint + build 그린이 머지 조건.
+**적용 시점**: 별도 PLAN 문서 — [`PLAN_MULTI_PROVIDER.md`](PLAN_MULTI_PROVIDER.md) — 5 phase 로 나눠서 단계별 머지. 각 phase 끝마다 typecheck + test + lint + build 그린이 머지 조건.
 
 **spec 영향**: §16.4 LLM modes 표 확장. §10.5 self-error 문구 일반화. §12.2 exit code 표는 그대로 (5 의 의미만 일반화).
 
