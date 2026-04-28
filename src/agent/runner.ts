@@ -285,6 +285,10 @@ export async function runAgent(
     if (opts.transcriptDir !== undefined) toolDeps.transcriptDir = opts.transcriptDir;
     if (opts.stdout !== undefined) toolDeps.progressStdout = opts.stdout;
     if (opts.nowIso !== undefined) toolDeps.nowIso = opts.nowIso;
+    // §5.3 deterministic per-item routing: surface the runner's locked KB
+    // set to write tools so they can compute the canonical KB from
+    // `item.paths` instead of trusting the agent's `kb_path` choice.
+    toolDeps.kbChain = opts.kbChain.map((e) => e.kb_path);
 
     const buildTools = opts.toolBuilder ?? buildHarvestTools;
     const tools = buildTools(toolDeps);

@@ -91,4 +91,12 @@ export interface HarvestServerDeps {
   nowIso?: () => string;
   /** Override the stdout sink for `report_progress`. */
   progressStdout?: NodeJS.WritableStream;
+  /**
+   * Absolute `.harvest/` paths the runner has authority over (= currently
+   * locked + INDEX-managed). Used by write tools for deterministic per-item
+   * routing (§5.3) — `create_item` consults this to compute the canonical
+   * KB from `item.paths`. Falls back to walk-up from the input `kb_path`
+   * when not provided (unit-test convenience).
+   */
+  kbChain?: string[];
 }

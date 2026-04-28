@@ -205,13 +205,14 @@ export function buildHarvestTools(deps: HarvestToolsDeps = {}): ToolSet {
 
     create_item: tool({
       description:
-        "Create a new active KB item with frontmatter + body. Enforces category cap, severity-only-on-anti-pattern, region-aware path normalization, and unique slug per category.",
+        "Create a new active KB item with frontmatter + body. Enforces category cap, severity-only-on-anti-pattern, region-aware path normalization, deterministic per-item routing (§5.3), and unique slug per category.",
       inputSchema: createItemInputSchema,
-      execute: async (args: unknown) =>
-        createItem(
-          args as Parameters<typeof createItem>[0],
-          deps.nowIso !== undefined ? { nowIso: deps.nowIso } : undefined,
-        ),
+      execute: async (args: unknown) => {
+        const createDeps: Parameters<typeof createItem>[1] = {};
+        if (deps.nowIso !== undefined) createDeps.nowIso = deps.nowIso;
+        if (deps.kbChain !== undefined) createDeps.kbChain = deps.kbChain;
+        return createItem(args as Parameters<typeof createItem>[0], createDeps);
+      },
     }) as ToolSet[string],
 
     update_item: tool({

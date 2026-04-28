@@ -49,6 +49,7 @@ import { idPrefix } from "../../core/kb/categories.js";
 import { findKbChain } from "../../core/kb/chain.js";
 import { allocateId } from "../../core/kb/id.js";
 import { normalizePathsForKb } from "../../core/kb/paths.js";
+import { findCanonicalKb } from "../../core/kb/route.js";
 import { nowIso as defaultNowIso } from "../../core/time.js";
 import type { CategoryType } from "../../core/types.js";
 import {
@@ -131,6 +132,13 @@ export interface CreateItemOutput {
   paths_dropped: string[];
   /** ISO 8601, equal to frontmatter `created`. */
   created_at: string;
+  /**
+   * Set when the runner re-routed this item to its canonical KB per §5.3
+   * — the agent's input `kb_path` differed from the unanimous-touched-files
+   * KB. The agent should mirror this in `kb_actions[].kb` when calling
+   * `mark_session_processed`. Absent on the common path (no reroute).
+   */
+  rerouted_from?: string;
 }
 
 export type CreateItemErrorOutput = ErrorEnvelope;
@@ -140,6 +148,13 @@ export interface CreateItemDeps {
   nowIso?: () => string;
   /** Override KB chain finder for tests (rare; defaults to `findKbChain`). */
   findKbChainFn?: (cwd: string) => string[];
+  /**
+   * Absolute `.harvest/` paths the runner has authority over. Used for
+   * deterministic per-item routing (§5.3): see {@link findCanonicalKb}.
+   * Falls back to `findKbChain(kb_dir)` when omitted — sufficient for unit
+   * tests that don't exercise the multi-KB reroute path.
+   */
+  kbChain?: string[];
 }
 
 // -----------------------------------------------------------------------------
@@ -159,12 +174,53 @@ export async function createItem(
     return schemaViolation("create_item", parsed.error.issues);
   }
   const data = parsed.data;
-  return withKbWriteLock(data.kb_path, () => createItemLocked(data, deps));
+
+  // 1a. Deterministic per-item routing (§5.3).
+  //
+  // The agent picked `data.kb_path`. If `data.item.paths` unanimously fall
+  // in a *different* chain KB, override and write there instead. We treat
+  // the agent's choice as a hint, not a decision — this closes the I-15/
+  // I-16 gap where a model could see the full chain and still pin items
+  // to the root KB. Only unanimous overrides apply (see findCanonicalKb).
+  //
+  // The chain we route over is the runner's locked set when provided,
+  // otherwise we fall back to the input KB's walk-up. The fallback is
+  // only reachable from unit tests that don't plumb `kbChain` through —
+  // production calls always carry it (set in `agent/runner.ts`).
+  const findChain = deps.findKbChainFn ?? findKbChain;
+  const inputKbDir = path.dirname(data.kb_path);
+  const routingChain =
+    deps.kbChain !== undefined && deps.kbChain.length > 0
+      ? deps.kbChain
+      : findChain(inputKbDir);
+  // Defensive: include input.kb_path so it's a routing candidate even if
+  // (a) the runner chain somehow drifted, or (b) the fallback walk-up
+  // didn't surface it.
+  const chainForRouting = routingChain.includes(data.kb_path)
+    ? routingChain
+    : [data.kb_path, ...routingChain];
+
+  const canonical = findCanonicalKb(
+    data.item.paths,
+    chainForRouting,
+    inputKbDir,
+  );
+  const effectiveKbPath = canonical ?? data.kb_path;
+  const reroutedFrom =
+    canonical !== null && canonical !== data.kb_path
+      ? data.kb_path
+      : undefined;
+
+  const effectiveData: CreateItemInput = { ...data, kb_path: effectiveKbPath };
+  return withKbWriteLock(effectiveKbPath, () =>
+    createItemLocked(effectiveData, deps, reroutedFrom),
+  );
 }
 
 async function createItemLocked(
   data: CreateItemInput,
   deps: CreateItemDeps,
+  reroutedFrom: string | undefined,
 ): Promise<CreateItemOutput | CreateItemErrorOutput> {
   const item = data.item;
 
@@ -190,8 +246,16 @@ async function createItemLocked(
   }
 
   // 4. Normalize paths
+  //
+  // Region masking (§5.2) needs the *full* set of KBs the runner has
+  // authority over so descendant KBs correctly mask out their subtrees.
+  // Walk-up alone misses sibling/descendant KBs (the I-15/I-16 gap), so
+  // prefer the runner-injected `deps.kbChain` when available.
   const findChain = deps.findKbChainFn ?? findKbChain;
-  const allKbs = findChain(path.dirname(kbPath));
+  const allKbs =
+    deps.kbChain !== undefined && deps.kbChain.length > 0
+      ? deps.kbChain
+      : findChain(path.dirname(kbPath));
   // Make sure kbPath itself is in `allKbs` (region masking depends on the
   // current KB being a member). `findKbChain` from kbDir's own dir typically
   // returns it, but guard defensively.
@@ -264,13 +328,15 @@ async function createItemLocked(
     createdAt,
   });
 
-  return {
+  const out: CreateItemOutput = {
     item_id: itemId,
     file_path: filePath,
     paths_normalized: pathsNormalized,
     paths_dropped: pathsDropped,
     created_at: createdAt,
   };
+  if (reroutedFrom !== undefined) out.rerouted_from = reroutedFrom;
+  return out;
 }
 
 // -----------------------------------------------------------------------------

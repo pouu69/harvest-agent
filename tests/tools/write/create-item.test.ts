@@ -204,6 +204,121 @@ describe("createItem (path normalization)", () => {
   });
 });
 
+describe("createItem (deterministic per-item routing — §5.3, I-17)", () => {
+  it("reroutes when item.paths unanimously fall in a deeper chain KB", async () => {
+    // Layout:
+    //   <root>/repo/.harvest         (root KB; agent's input choice)
+    //   <root>/repo/apps/web/.harvest    (sub-app KB; canonical for the path)
+    const repoKb = await makeKb(root, "repo");
+    const subKb = path.join(root, "repo", "apps", "web", ".harvest");
+    await fsp.mkdir(subKb, { recursive: true });
+    const touched = path.join(root, "repo", "apps", "web", "src", "App.tsx");
+
+    const out = (await createItem(
+      baseInput(repoKb, { paths: [touched] }),
+      {
+        nowIso: () => NOW,
+        kbChain: [repoKb, subKb],
+      },
+    )) as CreateItemOutput;
+
+    expect("error" in out).toBe(false);
+    // File written under the canonical sub-app KB.
+    expect(out.file_path.startsWith(subKb)).toBe(true);
+    // rerouted_from surfaces the agent's original (now-overridden) choice.
+    expect(out.rerouted_from).toBe(repoKb);
+    // Path normalization happens against the canonical KB → KB-relative.
+    expect(out.paths_normalized).toEqual(["src/App.tsx"]);
+  });
+
+  it("does NOT reroute when item.paths fall in the input KB's region", async () => {
+    const repoKb = await makeKb(root, "repo");
+    const subKb = path.join(root, "repo", "apps", "web", ".harvest");
+    await fsp.mkdir(subKb, { recursive: true });
+    const touched = path.join(root, "repo", "lib", "util.ts"); // root region
+
+    const out = (await createItem(
+      baseInput(repoKb, { paths: [touched] }),
+      {
+        nowIso: () => NOW,
+        kbChain: [repoKb, subKb],
+      },
+    )) as CreateItemOutput;
+
+    expect("error" in out).toBe(false);
+    expect(out.file_path.startsWith(repoKb)).toBe(true);
+    expect(out.rerouted_from).toBeUndefined();
+    expect(out.paths_normalized).toEqual(["lib/util.ts"]);
+  });
+
+  it("does NOT reroute when paths are mixed across multiple KBs (conservative)", async () => {
+    // Mixed: one path in root region, one in sub-app region. Agent's
+    // choice (root) is kept since neither KB unanimously owns the item.
+    const repoKb = await makeKb(root, "repo");
+    const subKb = path.join(root, "repo", "apps", "web", ".harvest");
+    await fsp.mkdir(subKb, { recursive: true });
+    const inRoot = path.join(root, "repo", "lib", "util.ts");
+    const inSub = path.join(root, "repo", "apps", "web", "src", "App.tsx");
+
+    const out = (await createItem(
+      baseInput(repoKb, { paths: [inRoot, inSub] }),
+      {
+        nowIso: () => NOW,
+        kbChain: [repoKb, subKb],
+      },
+    )) as CreateItemOutput;
+
+    expect("error" in out).toBe(false);
+    expect(out.file_path.startsWith(repoKb)).toBe(true);
+    expect(out.rerouted_from).toBeUndefined();
+    // The sub-app path is dropped because the input KB is root and the
+    // sub-app region is masked out — same as the existing region pipeline.
+    expect(out.paths_normalized).toEqual(["lib/util.ts"]);
+    expect(out.paths_dropped).toEqual([inSub]);
+  });
+
+  it("does NOT reroute when paths is empty (abstract decision/learning)", async () => {
+    const repoKb = await makeKb(root, "repo");
+    const subKb = path.join(root, "repo", "apps", "web", ".harvest");
+    await fsp.mkdir(subKb, { recursive: true });
+
+    const out = (await createItem(
+      baseInput(repoKb, { paths: [] }),
+      {
+        nowIso: () => NOW,
+        kbChain: [repoKb, subKb],
+      },
+    )) as CreateItemOutput;
+
+    expect("error" in out).toBe(false);
+    expect(out.file_path.startsWith(repoKb)).toBe(true);
+    expect(out.rerouted_from).toBeUndefined();
+  });
+
+  it("falls back to walk-up when kbChain is not provided (legacy path)", async () => {
+    // Without `deps.kbChain`, `create_item` walks up from `kb_path`'s dir.
+    // walk-up cannot see descendant sub-app KBs, so the sub-app KB is
+    // invisible to the routing step *and* to region masking. The path
+    // therefore counts as "inside repoKb's region" (no child mask), the
+    // item gets created at repoKb, no reroute. This is the pre-I-17
+    // behavior — preserved for unit tests / direct callers that don't
+    // plumb the runner's chain. Production calls always inject kbChain.
+    const repoKb = await makeKb(root, "repo");
+    const subKb = path.join(root, "repo", "apps", "web", ".harvest");
+    await fsp.mkdir(subKb, { recursive: true });
+    const touched = path.join(root, "repo", "apps", "web", "src", "App.tsx");
+
+    const out = (await createItem(
+      baseInput(repoKb, { paths: [touched] }),
+      { nowIso: () => NOW },
+    )) as CreateItemOutput;
+
+    expect("error" in out).toBe(false);
+    expect(out.file_path.startsWith(repoKb)).toBe(true);
+    expect(out.rerouted_from).toBeUndefined();
+  });
+});
+
 describe("createItem (concurrency)", () => {
   it("assigns distinct IDs when called in parallel against the same KB", async () => {
     const kb = await makeKb(root, "proj");

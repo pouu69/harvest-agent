@@ -247,6 +247,45 @@ export function nowIso(): string {
 
 **부수 변경 (`harvest start` 요약 라인)**: `✓ Harvest run complete (12 turns, $0.0000 total)` 의 `$0.0000` 은 AI SDK 가 provider 별 cost 를 normalize 하지 않아 항상 0 으로 표시되어 오해 유발. 토큰 카운트 (`47.5K in / 12.3K out tokens`) 로 교체. `RunAgentResult` 에 `inputTokens` / `outputTokens` 추가, `RunState.inputTokens` / `outputTokens` 추가, `formatTokenUsage` / `formatTokenCount` 헬퍼 도입. Cost 는 per-provider price helper 가 도입되면 다시 추가 가능.
 
+### I-17. LLM 라우팅의 비결정성 — `create_item` 의 deterministic 라우팅 enforce
+
+**상태**: ✅ **resolved** (2026-04-28)
+
+**위치**:
+- §5.3 per-item 라우팅 — *"항목은 *touched files 기반 가장 가까운 KB* 에 들어간다"*. 이는 결정론적 로직이지만 spec 본문은 *어디서* 강제되는지 침묵.
+- §9.5 `create_item` 입력 — `kb_path` 가 agent 입력 인자. agent (= LLM) 가 라우팅 결정자.
+
+**원래 결함**: §5.3 자체는 결정론적 알고리즘(touched files → 가장 가까운 KB)인데, 실제 enforcement 가 LLM 의 `kb_path` 선택에 위임돼 있음. I-15/I-16 가 chain 가시성 문제를 풀어 *"에이전트가 sub-app KB 를 볼 수 있게"* 만들었지만, *"꼭 거기로 보내게"* 강제할 코드 경로는 없었음. 결과: 같은 transcript 도 모델이 *"애매하니 root 로"* 결정하면 root 로 가서 사용자에게 비결정적으로 보임.
+
+**증상** (사용자 dogfooding, 2026-04-28):
+- I-15/I-16 fix 후에도 *"아직도 root 에 문서가 생성된다. 결정론적인 상황이 아닌거같내."*
+- chain 에는 sub-app KB 가 들어와 있음에도 `kb_actions[].kb` 가 root 로 박히는 케이스 잔존.
+
+**해소** (silent reroute, B 안):
+
+1. **`core/kb/route.ts:findCanonicalKb`** 신설: `(touched_paths, chain, anchor)` → 모든 path 가 만장일치로 한 KB 의 region 에 들어가면 그 KB 를 반환, 아니면 null. 보수적으로 unanimous-only.
+2. **`create_item` 본문**: Zod parse 직후, lock 획득 *전*에 canonical 계산. agent 입력 `kb_path` 와 다르면 override + lock 도 canonical 의 것으로 획득. `withKbWriteLock(effectiveKbPath, ...)`. `data.kb_path` 도 effective 값으로 갱신.
+3. **`rerouted_from` 출력 필드**: agent 가 `kb_actions[].kb` 를 자신의 입력 그대로 채우는 대신 reroute 결과로 갱신할 수 있도록 envelope 에 surface. `mark_session_processed` 에서 multi-KB ledger sync 가 정확해짐.
+4. **`HarvestServerDeps.kbChain`** 추가: runner 가 `opts.kbChain.map(e => e.kb_path)` 를 주입. 이 배열이 region masking + 라우팅 양쪽의 *single source of truth* — walk-up only `findKbChain` 으로 떨어지는 fallback 은 unit test 편의용으로만 남김.
+5. **path normalization 이 같은 chain 사용**: 기존엔 `findKbChain(kb_dir)` (walk-up) 으로 `chainWithSelf` 만들어 region masking 했는데, 이제 `deps.kbChain` 우선. 기존 region_violation / paths_dropped 동작은 동일하게 유지되되 자식 KB 마스킹이 정확히 적용됨.
+
+**왜 unanimous-only**:
+- Mixed 케이스(서로 다른 KB region 의 path 가 섞임) 는 *"항목을 분할하라"* 또는 *"cross-KB observation 으로 root 에 promote 하라"* 의 신호 — 코드가 자동 결정할 수 없음. 이 경우 agent 의 `kb_path` 를 그대로 존중.
+- update_item / supersede_item / archive_item 은 *기존 항목 위에서 동작* — kb_path 가 항목의 위치이므로 reroute 무의미. create_item 만 적용.
+
+**구현 위치**:
+- `src/core/kb/route.ts` (신규).
+- `src/tools/write/create-item.ts` — reroute 로직 + `kbChain` deps + `rerouted_from` 출력 필드.
+- `src/tools/server.ts` — `HarvestServerDeps.kbChain` 필드 추가.
+- `src/agent/tool-registry.ts` — `create_item` execute 가 `deps.kbChain` 을 통과시킴.
+- `src/agent/runner.ts` — `toolDeps.kbChain = opts.kbChain.map(e => e.kb_path)`.
+- `tests/tools/write/create-item.test.ts` — 5 케이스 추가 (reroute / no-reroute / mixed / empty paths / fallback).
+
+**KB 출력 영향**:
+- (개선) sub-app 파일을 touch 한 항목이 LLM 변동성 무관하게 sub-app KB 로 들어감. *결정론적*.
+- (회귀 0) paths 가 input KB 영역 안 / paths 비어 있음 / mixed → agent 의 `kb_path` 그대로.
+- (회귀 0) `--discover` / 단일 KB / sub-app 시작 cwd → chain 에 다른 후보 KB 가 없으므로 reroute 트리거 안 됨.
+
 ### I-16. `get_kb_chain` walk-up only — sub-app KB 가 per-session 라우팅에 invisible
 
 **상태**: ✅ **resolved** (2026-04-28)

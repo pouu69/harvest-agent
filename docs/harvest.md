@@ -381,6 +381,7 @@ function isInKbRegion(filePath: string, kb: KBPath, allKbs: KBPath[]): boolean {
 **핵심 정책:**
 - **항목 복제 금지.** 한 항목은 정확히 하나의 KB에 존재한다. 검색은 paths 배열로.
 - "한 app에서 발견됐지만 다른 app에도 적용될 것 같은" 지식은 **root에 보내지 않는다.** app KB에 두고 `universality: unverified` 표시. 다른 KB에서도 같은 패턴이 발견될 때 promotion (§5.4).
+- **결정론 enforcement** (I-17): unanimous 케이스 ("모든 path 가 한 KB 의 영역") 는 `create_item` 내부에서 코드가 강제. agent 가 입력한 `kb_path` 가 다르면 silently reroute 하고 응답 envelope 의 `rerouted_from` 으로 알림. mixed / 빈 paths / cross-KB 케이스는 위 트리의 LLM 판단을 그대로 존중.
 
 ### 5.4 2회 룰 (Promotion)
 
