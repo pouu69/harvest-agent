@@ -1,5 +1,5 @@
 ---
-id: D-002
+id: D-004
 type: decision
 title: Agent max retries 1
 summary: 동일 실패 반복 비용을 줄이기 위해 maxRetries=1로 제한

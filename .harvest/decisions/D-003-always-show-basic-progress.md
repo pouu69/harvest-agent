@@ -1,5 +1,5 @@
 ---
-id: D-002
+id: D-003
 type: decision
 title: Always show basic progress
 summary: --verbose 없어도 핵심 단계 진행 로그를 출력한다

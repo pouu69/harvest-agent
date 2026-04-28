@@ -1,7 +1,7 @@
 ---
-generated_at: 2026-04-28T00:35:37+09:00
+generated_at: 2026-04-28T00:26:31.638Z
 schema_version: 1
-kb_path: harvest-agent/.harvest
+kb_path: .harvest
 total_items: 10
 counts:
   decisions: 4
@@ -27,9 +27,9 @@ counts:
 | ID | Title | Summary | Updated |
 |---|---|---|---|
 | D-001 | two-stage-sigint-shutdown | SIGINT는 2단계(1차 abort, 2차 강제종료)로 처리 | 04-28 |
-| D-002 | agent-max-retries-1 | 동일 실패 반복 비용을 줄이기 위해 maxRetries=1로 제한 | 04-28 |
-| D-002 | always-show-basic-progress | --verbose 없어도 핵심 단계 진행 로그를 출력한다 | 04-28 |
 | D-002 | extract-uses-selected-provider | EXTRACT도 start의 provider/model 설정을 그대로 사용한다 | 04-28 |
+| D-003 | always-show-basic-progress | --verbose 없어도 핵심 단계 진행 로그를 출력한다 | 04-28 |
+| D-004 | agent-max-retries-1 | 동일 실패 반복 비용을 줄이기 위해 maxRetries=1로 제한 | 04-28 |
 
 ## 💡 Learnings
 
