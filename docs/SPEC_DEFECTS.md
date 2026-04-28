@@ -247,6 +247,32 @@ export function nowIso(): string {
 
 **부수 변경 (`harvest start` 요약 라인)**: `✓ Harvest run complete (12 turns, $0.0000 total)` 의 `$0.0000` 은 AI SDK 가 provider 별 cost 를 normalize 하지 않아 항상 0 으로 표시되어 오해 유발. 토큰 카운트 (`47.5K in / 12.3K out tokens`) 로 교체. `RunAgentResult` 에 `inputTokens` / `outputTokens` 추가, `RunState.inputTokens` / `outputTokens` 추가, `formatTokenUsage` / `formatTokenCount` 헬퍼 도입. Cost 는 per-provider price helper 가 도입되면 다시 추가 가능.
 
+### I-13. `harvest init` 기본이 monorepo 신호를 무시하고 단일 KB 만 생성
+
+**상태**: ✅ **resolved** (2026-04-28)
+
+**위치**: §12.1 lines 2040-2079 (`harvest init` / `--scan` 정의)
+
+**원래 결함**: `harvest init` 의 기본 동작은 cwd 한 곳에만 `.harvest/` 를 만들고, monorepo 자동 감지(`pnpm-workspace.yaml`, `package.json` `workspaces`, `turbo.json`, `nx.json`, `Cargo.toml`, `go.work`)는 `--scan` 플래그를 명시적으로 줘야만 동작했다. 그러나 §4.1 의 "전형적 모노레포 구조" 예시 자체가 root + 각 workspace 의 multi-KB 구조이고, init 출력에는 `--scan` 옵션의 존재를 알리는 힌트조차 없었다 — 사용자가 monorepo 에서 `harvest init` 을 그냥 실행하면 신호를 통째로 놓쳤다는 사실을 알 길이 없다.
+
+**측정된 사례**: 사용자가 `/Users/<id>/.../webdev/one` 모노레포 (pnpm-workspace.yaml 보유) 에서 `harvest init` 실행 → root 한 곳에만 `.harvest/` 가 생성됨. 사용자가 이를 버그로 보고.
+
+**해소**: `harvest init` 이 `detectWorkspaces(cwd)` 를 *항상* 먼저 호출. 매칭되면 root + 모든 workspace 에 일괄 생성 (구 `--scan` 흐름), 매칭 없으면 cwd 단일 생성. `--scan` 플래그는 보존하되 알리아스가 됐다 — 유일하게 남은 동작 차이는 "monorepo 표지가 없는 dir 에서 `--scan` 을 명시했을 때만 'No monorepo config detected' 응답을 출력"하는 것 (사용자의 명시적 요청에 대한 acknowledgment 만 보존).
+
+**구현 위치**:
+- `src/cli/init.ts` — `runInit` 본문 재배치 (`detectWorkspaces` → 분기). 큐 처리 본문은 `runDetectedScan` 으로 rename.
+- `src/cli/index.ts:89-100` — `printUsage` 의 `init` / `--scan` 줄 갱신.
+- `src/cli/argv.ts` — 파서 변경 없음. `scan` 필드의 JSDoc 만 deprecated alias 로 표기.
+- `tests/cli/init.test.ts` — `describe("runInit (auto-detect, no --scan)")` 블록 신설 (회귀 가드 + 신규 동작 + nx.json/idempotency 가드).
+- `README.md` — 모노레포 자동 감지 섹션 + Quickstart + 명령어 표 갱신.
+
+**spec 측 변경 (반영 완료)**: 본 commit 에서 `docs/harvest.md` §12.1 의 `harvest init` 본문을 "monorepo 면 root + 각 workspace, 아니면 cwd 단일 — 자동 감지" 로, `--scan` 라인을 "deprecated alias" 로 직접 갱신. v2.4 plan 일괄 반영 시 §4.1 예시 본문과 §13 등 cross-ref 도 한 번에 정합화 권장.
+
+**KB 출력 영향**:
+- (개선) monorepo 사용자: 한 번의 `harvest init` 으로 모든 workspace 의 KB + CLAUDE.md 가 자동 정합 (§13.2 의 chain import 가 처음부터 올바르게 emit).
+- (회귀 0) 비-monorepo 단일 dir 사용자: 출력 byte-for-byte 동일 (`runInitSingle` 흐름 보존, `--scan` 없을 때 추가 메시지 없음).
+- (의도된 행동 변경) **nx.json 사용자, `--scan` 미지정**: 변경 전엔 cwd 에 단일 `.harvest/` 가 silent 로 생성됐다. 변경 후엔 "nx.json detected; please run `harvest init` per workspace dir manually." 만 출력하고 KB 를 만들지 않는다. 이는 위 본 결함과 *동일한 결함의 nx 분기* — 다른 monorepo 도구에서 silent 단일-KB 생성을 결함으로 본 이상, nx 만 다르게 두는 건 일관성을 깬다. spec §12.1 의 "nx 는 manual init" 의도와도 정합.
+
 ### I-3. §7.3 INDEX.md 예시 ↔ §18.3 예시의 Status Summary 형태 불일치
 
 **위치**:

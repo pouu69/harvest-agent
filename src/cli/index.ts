@@ -90,13 +90,13 @@ function printUsage(out: NodeJS.WritableStream): void {
   out.write(`Usage: harvest <command> [flags]
 
 Commands:
-  init      Initialize a Harvest KB in the current directory.
+  init      Initialize a Harvest KB. Auto-detects monorepo workspaces.
   start     Run the agent over unprocessed Claude Code sessions.
   help      Print this message.
   version   Print the harvest CLI version.
 
 Init flags:
-  --scan        Auto-detect monorepo workspaces and init each.
+  --scan        Deprecated alias (auto-detect is now the default).
   --root        Mark this KB as the root.
 
 Start flags:

@@ -48,7 +48,10 @@ export interface ParsedArgs {
     verbose: boolean;
     /** `start --json` — machine-readable output. */
     json: boolean;
-    /** `init --scan` — auto-detect monorepo workspaces. */
+    /** `init --scan` — deprecated alias. Auto-detect is the default behavior
+     *  per SPEC_DEFECTS I-13; the flag is kept for backward compatibility and
+     *  only affects whether `runInit` emits the "No monorepo config detected"
+     *  acknowledgment in non-monorepo dirs. */
     scan: boolean;
     /** `init --root` — mark this KB as the chain root. */
     root: boolean;

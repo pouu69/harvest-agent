@@ -10,6 +10,7 @@
 | Sweep | Commit | 내용 |
 |---|---|---|
 | P0/P1/P2/P3 sweep | `ed05872` | **P1.1** runner 가 정상 종료 시 (success/max_turns/non-fatal error/SDK self-error) 모든 KB INDEX 재빌드 (per-KB 에러 격리, lock 해제 전 실행). **P1.2** `list_unprocessed_sessions` 스키마에 `cwd_filter` 추가 + `discover_path` 실제 사용 — out-of-scope 후보를 KB-chain check 전에 drop, `skipped_out_of_scope` 카운트 surface. **P2.1** `readCandidate` 가 dominant cwd 채택 (max-count + first-encounter tiebreak; B-2 해소). **P2.2** `read_transcript` summary 모드 3-stage fallback (sessions-index.json → `<session>-summary.jsonl` → compressor). **P3** `core/time.isoFromMs(ms)` 신설; `first_seen_at` 가 local-offset ISO 사용 (UTC `Z` 제거). +18 tests. ✅ spec + ✅ quality. |
+| init auto-detect (I-13) | (this commit) | `harvest init` 이 `--scan` 없이도 cwd 의 monorepo 표지(pnpm-workspace.yaml / package.json#workspaces / turbo.json / nx.json / Cargo.toml / go.work)를 자동 감지하여 root + 모든 workspace 에 일괄 생성. `--scan` 은 deprecated alias 로 남아 "no monorepo config" acknowledgment 출력 여부에만 영향. §12.1 + SPEC_DEFECTS I-13 갱신. +2 tests (12/12 init 테스트 green). |
 
 ### 알려진 maintenance debt (non-blocking)
 - **dominant-cwd 알고리즘 중복** — `list-unprocessed-sessions.ts:415-456` 와 `core/transcript/extractor.ts:180-345` 에 같은 histogram + first-encounter tiebreak 로직. follow-up 추출 권장 (`pickDominantCwd(lines)` 헬퍼).
@@ -62,7 +63,7 @@
 
 테스트: 449/449 pass. `npm run typecheck && npm test && npm run lint && npm run build` 전부 통과.
 
-### 발견된 spec 결함 → [`SPEC_DEFECTS.md`](./SPEC_DEFECTS.md) 참고
+### 발견된 spec 결함 → [`SPEC_DEFECTS.md`](SPEC_DEFECTS.md) 참고
 
 Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_DEFECTS.md` 에 정리.
 요약:
@@ -90,7 +91,7 @@ Task 1–5 진행 중 발견한 plan 결함/모순/stale reference 모두 `SPEC_
 
 새 task 진행 중 결함 발견 시 `SPEC_DEFECTS.md` 에 추가하고 prefix 별 ID 부여 (`B-`/`I-`/`S-`/`O-`/`D-`).
 
-### 사용자 design 제안 → [`DESIGN_PROPOSALS.md`](./DESIGN_PROPOSALS.md)
+### 사용자 design 제안 → [`DESIGN_PROPOSALS.md`](DESIGN_PROPOSALS.md)
 
 spec 자체를 바꾸자는 제안 (SPEC_DEFECTS 와 별개로) 을 추적. 현재 등록:
 - **P-1** `harvest start --recent N` 옵션 → ✅ 수락 (Task 20 wiring).

@@ -2039,16 +2039,16 @@ session이 미처리 = 모든 후보 KB의 processed.json 어느 곳에도
 
 #### `harvest init`
 
-**목적**: 현재 디렉토리에 KB 생성.
+**목적**: KB 생성. 모노레포 표지가 cwd에 있으면 root + 감지된 각 workspace에 일괄 생성, 아니면 cwd 한 곳에 단일 생성한다 (자동 감지). 사용자는 옵션 없이 그대로 실행하면 된다.
 
 **옵션**:
-- `--scan`: 모노레포 도구 설정 자동 감지하여 멀티 KB 일괄 생성
+- `--scan`: deprecated alias. 자동 감지가 기본이 된 후로는 동작에 거의 영향 없음. 다만 monorepo 표지가 없는 dir 에서 명시했을 때 "No monorepo config detected" 한 줄 acknowledgment 가 추가될 뿐. (SPEC_DEFECTS I-13)
 - `--root`: 루트 KB 명시 (init 시 root임을 표시)
 
 **동작**:
 
 ```bash
-$ harvest init
+$ harvest init                                    # 단일-dir
 ✓ Created .harvest/ in /Users/me/my-project
   - INDEX.md (empty)
   - decisions/, learnings/, reusable/, anti-patterns/
@@ -2059,20 +2059,18 @@ Next: run `harvest start` after some Claude Code sessions.
 ```
 
 ```bash
-$ harvest init --scan
+$ harvest init                                    # monorepo 표지(pnpm-workspace.yaml 등) 자동 감지
 Detected workspaces (pnpm-workspace.yaml):
-  □ apps/web
-  □ apps/api
-  □ apps/admin
-  □ packages/ui
-  □ <root>
+  - /Users/me/my-monorepo
+  - /Users/me/my-monorepo/apps/web
+  - /Users/me/my-monorepo/apps/api
+  - /Users/me/my-monorepo/packages/ui
 
-Select directories to track (Space, Enter to confirm):
-> [x] <root>
-  [x] apps/web
-  [x] apps/api
-  [ ] apps/admin
-  [x] packages/ui
+Creating .harvest/ in each:
+✓ Created .harvest/ in /Users/me/my-monorepo
+  ...
+✓ Created .harvest/ in /Users/me/my-monorepo/apps/web
+  ...
 
 ✓ Created .harvest/ in 4 locations
 ✓ CLAUDE.md updated in each

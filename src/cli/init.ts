@@ -1,14 +1,17 @@
 /**
  * `harvest init` command, per harvest.md §12.1 + §13.
  *
- * Two modes:
+ * Behavior — see SPEC_DEFECTS I-13 for the policy amendment that folded
+ * `--scan` into the default. Always run workspace detection first:
  *
- *   1. **Single-KB** (default): create `.harvest/` in `cwd` and ensure
- *      `<cwd>/CLAUDE.md` carries the harvest marker block (§13.1).
- *   2. **Scan** (`--scan`): detect monorepo workspaces from the usual config
- *      files (pnpm-workspace.yaml, package.json `workspaces`, turbo.json,
- *      Cargo.toml, go.work; nx.json prints a hint and bails) and run the
- *      single-KB flow at every detected location plus the project root.
+ *   1. monorepo config found → init root + every detected workspace
+ *      (the former `--scan` flow).
+ *   2. nothing found → init `cwd` only (single-KB).
+ *
+ * `--scan` is preserved as a no-op alias for the auto-detect default; its
+ * only remaining behavioral effect is to opt in to the explicit "No monorepo
+ * config detected" fallback message when there is nothing to scan, so users
+ * who typed `--scan` get an acknowledgment.
  *
  * Spec-silent decisions documented in code:
  *   - **`--scan` UI**: §12.1 shows an interactive multi-select prompt. v1
@@ -55,7 +58,9 @@ import { buildIndexMarkdown } from "../core/kb/index-builder.js";
 export interface InitOptions {
   /** Where to create `.harvest/` (typically `process.cwd()`). */
   cwd: string;
-  /** `--scan`: monorepo auto-detection. */
+  /** `--scan`: deprecated alias per SPEC_DEFECTS I-13. Auto-detect is the
+   *  default; this flag now only gates the "No monorepo config detected"
+   *  acknowledgment in non-monorepo dirs. */
   scan: boolean;
   /** `--root`: mark this KB as the chain root. */
   root: boolean;
@@ -76,10 +81,39 @@ export interface InitOptions {
  * to finish the rest of the list.
  */
 export async function runInit(opts: InitOptions): Promise<number> {
-  if (!opts.scan) {
-    return runInitSingle(opts.cwd, opts);
+  const detected = detectWorkspaces(opts.cwd);
+
+  // nx.json bail-out is an in-band signal from `detectWorkspaces`. Print the
+  // manual-init hint and exit — same as the old `--scan` behavior, but it
+  // now triggers without the flag because nx workspaces are no different
+  // from any other monorepo from the user's POV. Note this *changes* the
+  // pre-I-13 behavior of `harvest init` (no scan) in an nx-only dir, which
+  // used to silently create a single root `.harvest/`. That silent single-
+  // KB creation was the same I-13 defect as for pnpm/turbo/etc., so the
+  // new bail is consistent — see SPEC_DEFECTS I-13 "KB 출력 영향".
+  if (detected.source === "nx.json") {
+    opts.stdout.write(
+      "nx.json detected; please run `harvest init` per workspace dir manually.\n",
+    );
+    return 0;
   }
-  return runInitScan(opts);
+
+  if (detected.source !== null && detected.paths.length > 0) {
+    return runDetectedScan(opts, detected);
+  }
+
+  // No monorepo config. The "No monorepo config detected" acknowledgment is
+  // gated on `opts.scan` because it only makes sense as a response to an
+  // explicit user request: a plain `harvest init` in a non-monorepo dir
+  // should produce the original single-KB output verbatim (no surprise extra
+  // lines).
+  if (opts.scan) {
+    opts.stdout.write(
+      "No monorepo config detected (pnpm-workspace.yaml, package.json workspaces, turbo.json, Cargo.toml, go.work).\n" +
+        "Falling back to single-KB init at this directory.\n\n",
+    );
+  }
+  return runInitSingle(opts.cwd, opts);
 }
 
 // -----------------------------------------------------------------------------
@@ -91,8 +125,8 @@ async function runInitSingle(
   opts: InitOptions,
   /**
    * Anchor that `kb_path` in the rendered INDEX frontmatter is computed
-   * relative to. Passed through by `runInitScan` so each workspace's INDEX
-   * gets a chain-meaningful identifier like `apps/web/.harvest` (matching
+   * relative to. Passed through by `runDetectedScan` so each workspace's
+   * INDEX gets a chain-meaningful identifier like `apps/web/.harvest` (matching
    * the §7.3 example) instead of every workspace claiming `.harvest`.
    * Defaults to `targetCwd` (single-KB mode at the repo root).
    */
@@ -177,25 +211,14 @@ interface DetectedWorkspaces {
   paths: string[];
 }
 
-async function runInitScan(opts: InitOptions): Promise<number> {
-  const detected = detectWorkspaces(opts.cwd);
-
-  // nx.json bail-out is an in-band signal from `detectWorkspaces`.
-  if (detected.source === "nx.json") {
-    opts.stdout.write(
-      "nx.json detected; please run `harvest init` per workspace dir manually.\n",
-    );
-    return 0;
-  }
-
-  if (detected.source === null || detected.paths.length === 0) {
-    opts.stdout.write(
-      "No monorepo config detected (pnpm-workspace.yaml, package.json workspaces, turbo.json, Cargo.toml, go.work).\n" +
-        "Falling back to single-KB init at this directory.\n\n",
-    );
-    return runInitSingle(opts.cwd, opts);
-  }
-
+/**
+ * Run the multi-workspace flow once `runInit` has confirmed a monorepo
+ * config matched. `detected` is non-null and `detected.paths.length > 0`.
+ */
+async function runDetectedScan(
+  opts: InitOptions,
+  detected: DetectedWorkspaces,
+): Promise<number> {
   // Always include the repo root unless it's already in the detected list.
   const rootAbs = path.resolve(opts.cwd);
   const queue: string[] = [];
