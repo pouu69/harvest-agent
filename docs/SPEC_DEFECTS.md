@@ -86,6 +86,8 @@ export function nowIso(): string {
 
 ### I-4. `harvest start` 기본 스코프: §12.1 (cwd 기반) ↔ §9.3 (`~/.claude/projects/` 전수)
 
+**상태**: ✅ **resolved** (1차: cwd_filter 도입 / 2차: I-15 nested KB 발견으로 monorepo 사각지대 해소)
+
 **위치**:
 - §12.1 line 2115 — `harvest start --discover <PATH>`: "지정 경로 하위에서 모든 `.harvest/` 자동 탐색 (cwd 무시)" — 즉 `--discover` 가 *없으면* cwd 기반.
 - §9.3 lines 1059–1062 — `list_unprocessed_sessions` 동작: "`~/.claude/projects/` 스캔 → ... 각 transcript의 첫 user 메시지에서 cwd 추출"
@@ -94,11 +96,9 @@ export function nowIso(): string {
 
 **예**: 사용자가 `~/projects/myapp` 에서 `harvest start` 실행 → 도구는 `~/.claude/projects/` 의 모든 transcript 를 스캔 → `~/projects/other-app` 의 transcript 도 그곳의 `.harvest/` 가 KB 체인으로 발견되면 미처리로 분류되어 처리됨. 사용자는 `myapp` 만 갱신될 것으로 기대.
 
-**보정 권장**:
-- `list_unprocessed_sessions` 입력에 `cwd_filter?: string` 추가. 호출자 (Task 20 `harvest start`) 가 `--discover` 가 없을 때 `process.cwd()` 를 전달, 도구는 transcript 의 cwd 가 그 하위인 것만 유지.
-- 또는 §12.1 prose 에 "기본 동작도 `~/.claude/projects/` 전수 스캔" 으로 의도 명시.
+**1차 해소** (Task 20): `list_unprocessed_sessions` 입력에 `cwd_filter: string[]` 추가. `runStart` 가 `--discover` 미지정 시 launch chain 의 모든 `kb_dir` 를 전달, 도구는 transcript 의 cwd 가 그 하위인 것만 유지. 단일 repo 사용자 케이스를 막음.
 
-**구현 영향**: Task 14 가 현재 cwd 필터 없이 spec 그대로 진행 중 (위험 낮음 — 사전 필터가 KB 없는 transcript 는 자동 제외). Task 20 (`harvest start`) 시점에 `cwd_filter` 옵션 추가 또는 §12.1 의도 명확화 필요.
+**2차 해소** (I-15, 2026-04-28): launch cwd 가 monorepo root 이고 sub-app `.harvest/` 가 존재하는 경우, 1차 해소만으로는 sub-app 세션이 cwd_filter 를 통과하지만 runner 가 sub-app KB 를 인지하지 못해 락/INDEX 가 누락되는 사각지대가 남아 있었음. I-15 에서 `resolveKbChain` 이 walk-up + walk-down 을 합친 chain 을 반환하도록 확장하여 해소.
 
 ### I-5. `list_unprocessed_sessions.discover_path` 입력 필드가 declared-but-unused
 
@@ -246,6 +246,51 @@ export function nowIso(): string {
 - 다른 도구들 audit 결과: `mark-session-processed.ts:failure_reason` 은 `if (!data.failure_reason)` 의 falsy 검사가 이미 빈 문자열을 잡음 (의도된 게 아니라 우연이지만 동작은 정상). `mark-session-processed.ts:brief_note` 는 dead field (핸들러 미사용) — 영향 없음.
 
 **부수 변경 (`harvest start` 요약 라인)**: `✓ Harvest run complete (12 turns, $0.0000 total)` 의 `$0.0000` 은 AI SDK 가 provider 별 cost 를 normalize 하지 않아 항상 0 으로 표시되어 오해 유발. 토큰 카운트 (`47.5K in / 12.3K out tokens`) 로 교체. `RunAgentResult` 에 `inputTokens` / `outputTokens` 추가, `RunState.inputTokens` / `outputTokens` 추가, `formatTokenUsage` / `formatTokenCount` 헬퍼 도입. Cost 는 per-provider price helper 가 도입되면 다시 추가 가능.
+
+### I-15. `harvest start` 기본 스코프에서 nested `.harvest/` 누락 — I-4 의 미완 꼬리
+
+**상태**: ✅ **resolved** (2026-04-28)
+
+**위치**:
+- §11.4 (lock 메커니즘) — *"`--discover` 로 여러 KB 를 처리할 때는 KB 단위로 순차 락"* 만 명시. 기본 동작에서의 다중 KB 처리는 침묵.
+- §12.1 `harvest start` — 기본 KB 스코프가 launch cwd walk-up 인지, monorepo 전체인지 불명확. §12.1 의 예시 출력은 *"KBs: apps/web (5), apps/api (2), root (1)"* 로 다중 KB 활동을 자연스럽게 가정하지만 실제로 그 기본동작이 어디서 오는지 본문에 적혀있지 않음.
+
+**원래 결함**: I-4 1 차 해소(`cwd_filter` 도입) 가 *"sub-app 세션을 받아들일 것이냐"* 에는 답을 줬지만, *"sub-app 세션을 받았는데 그 KB 를 어떻게 관리할 것이냐"* 는 미해결로 남아 있었음. 구체적으로:
+
+1. `src/cli/start.ts:resolveKbChain` 이 `findKbChain(opts.cwd)` 만 호출 → spec §5.1 정의대로 walk-up only.
+2. 사용자가 monorepo root 에서 `harvest start` 실행 → 결과 chain = `[<root>/.harvest]` (위로 갈 KB 없음).
+3. runner 는 이 chain 만 락(`runner.ts:260`) + INDEX 리빌드(`runner.ts:436`) + cwd_filter 계산(`runner.ts:303`).
+4. 그러나 `cwd_filter` 의 `isInsideOrEqual` 매칭이 *equal-or-descend* 라 sub-app 세션 (cwd = `<root>/one/`) 은 통과 → 처리 대상에 포함됨.
+5. 에이전트는 §5.3 per-item 라우팅으로 `<root>/one/.harvest` 에 정상 항목을 만들지만, runner 는 그 KB 의 *존재 자체를 모름* → 락 안 걸리고 INDEX 도 리빌드 안 됨.
+
+**증상** (사용자 dogfooding, 2026-04-28):
+- monorepo root + sub-app `.harvest/` 동시 존재 환경에서 `harvest start --recent 30` 실행
+- 에이전트의 `kb_actions[].kb` 는 sub-app 경로(`<...>/one/.harvest`, `<...>/charvis/.harvest`) 정상 기록 (CLI 의 `(one)` `(charvis)` per-session 라벨로 확인)
+- 그러나 `<...>/one/.harvest/INDEX.md` 가 갱신되지 않아 사용자에게는 *"root 에만 활동"* 하는 것처럼 보임
+- 사용자: *"monorepo 에서 수행했더니, root 에 다 생성되고, 실제 session 에 맞는 app 하위의 .harvest 에 생성되지 않는다"*
+
+**해소**:
+
+1. **`resolveKbChain` 확장**: `--discover` 미지정 시 `findKbChain(cwd)` (walk-up) 와 `walkForKbs(cwd, depth=6)` (walk-down) 의 dedupe 합집합을 반환. monorepo root 에서 실행해도 sub-app KB 가 chain 에 들어옴.
+2. **`walkForKbs` 헬퍼 분리**: 기존 `discoverKbChain` 의 디렉토리 walk 를 `walkForKbs(root, depth)` 로 추출하여 default path 와 `--discover` path 가 공유. `node_modules` / dotted dirs prune 정책은 그대로.
+3. **체인 순서**: `[descent...(closer to leaf, alpha-sorted), ascent...(closest-ancestor → topmost root)]`. cwd 의 자기 KB 는 ascent 위치에 단 한 번 등장 (descent 에서 dedupe). `is_root: index === arr.length - 1` 이 항상 topmost ancestor 를 가리킴.
+4. **per-item 라우팅 보존**: §5.3 (touched files 기반) 은 *전혀* 손대지 않음. 에이전트는 여전히 `get_kb_chain(session.cwd)` 로 per-session chain 을 받고, 항목별 KB 는 자기 paths 로 결정.
+5. **자연스러운 부수 효과**: chain 이 풍부해지면서 §11.4 다중 KB 락, §8.6 INDEX 리빌드, `cwd_filter` 의 in-scope 매칭이 모두 자동으로 sub-app KB 를 포괄.
+
+**구현 위치**:
+- `src/cli/start.ts` — `resolveKbChain` 본문, `walkForKbs(root, maxDepth)` 헬퍼 신설, `discoverKbChain` 이 헬퍼 호출하도록 정리.
+- `tests/cli/start.test.ts` — 4 개 추가: nested KB 발견 + chain 순서 + cwd 자기 KB dedupe + 단일 KB 회귀 + node_modules / dotted prune.
+- (runner 쪽은 이미 multi-KB 락/INDEX 회귀 테스트 보유 — chain 이 다중일 때의 동작은 기존 테스트가 cover.)
+
+**spec 측 변경 (반영 완료)**:
+- §11.4 첫 단락을 *"기본 동작도 launch cwd 의 walk-up + walk-down union"* 으로 명시.
+- §12.1 `harvest start` 본문에 **기본 KB 스코프** 한 단락 신설. `--discover` 옵션 설명을 *"임의 경로의 KB 셋을 명시 지정하고 싶을 때"* 용도로 다듬음.
+
+**KB 출력 영향**:
+- (개선) monorepo root 사용자: sub-app KB 가 자동으로 lock + INDEX 리빌드 대상 → "root 에만 활동" 환영 사라짐.
+- (회귀 0) 단일 KB 사용자: chain 동일, 출력 byte-for-byte 동일.
+- (회귀 0) `--discover <PATH>` 사용자: 기존 walk-down 동작 그대로.
+- (개선) §11.3 multi-KB ledger sync 가 의도대로 동작 — runner 가 모든 KB 의 `processed.json` 을 일관 관리.
 
 ### I-14. `harvest init` 의 일괄 생성 정책 — 사용자 의도 기반으로 좁힘
 

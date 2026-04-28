@@ -36,7 +36,11 @@
 import { existsSync, readdirSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import * as path from "node:path";
 
-import { findKbChain, computeKbRegion } from "../core/kb/chain.js";
+import {
+  computeDepthFromCwd,
+  computeKbRegion,
+  findKbChain,
+} from "../core/kb/chain.js";
 import { buildIndexMarkdown } from "../core/kb/index-builder.js";
 import { nowIso } from "../core/time.js";
 import type { KBChainEntry } from "../core/types.js";
@@ -259,37 +263,70 @@ export async function runStart(opts: StartOptions): Promise<number> {
 // KB chain resolution
 // -----------------------------------------------------------------------------
 
+/**
+ * Resolve the runner's KB chain.
+ *
+ * - `--discover <path>` set → walk that path only (legacy explicit mode).
+ * - default → walk-up from cwd (§5.1 ancestor chain) ∪ walk-down under cwd.
+ *
+ * The walk-down half closes the I-4 tail: `findKbChain` only ascends, so a
+ * `harvest start` invocation from a monorepo root used to be blind to
+ * sub-app `.harvest/` dirs. The runner then locked / INDEX-rebuilt only the
+ * launch KB while still accepting sub-app sessions via the cwd_filter pass —
+ * leaving sub-app KBs as half-managed phantoms (no lock, stale INDEX). The
+ * descent here makes them first-class members of the chain. §5.3 per-item
+ * routing is unchanged: the agent still picks the per-item KB based on
+ * touched files via `get_kb_chain(session.cwd)`.
+ *
+ * Order in the returned chain: descent entries first (closer to leaf,
+ * alpha-sorted for determinism), then ascent entries (closest-ancestor first
+ * → topmost root last). Cwd's own KB shows up in both walks; we dedupe so
+ * it appears exactly once and stays in its ascent position so the
+ * `is_root: index === arr.length - 1` semantics in {@link toChainEntry} keep
+ * marking the topmost ancestor as root.
+ */
 function resolveKbChain(opts: StartOptions): KBChainEntry[] {
   if (opts.discover !== undefined) {
     return discoverKbChain(opts.discover, opts.cwd);
   }
-  const kbPaths = findKbChain(opts.cwd);
-  return kbPaths.map((kbPath, i, arr) =>
+  const ascent = findKbChain(opts.cwd);
+  const descentRaw = walkForKbs(opts.cwd, MAX_DISCOVER_DEPTH);
+  const ascentSet = new Set(ascent);
+  const descent = descentRaw.filter((kb) => !ascentSet.has(kb));
+  descent.sort();
+  const merged = [...descent, ...ascent];
+  return merged.map((kbPath, i, arr) =>
     toChainEntry(kbPath, opts.cwd, i, arr),
   );
 }
 
+const MAX_DISCOVER_DEPTH = 6;
+
 /**
- * Walk a directory tree looking for `.harvest/` directories. Used by
- * `--discover <path>`. Cap depth at 6 (covers typical monorepos) and prune
- * heavy / hidden directories to keep this O(n) in practice.
+ * Walk a directory tree depth-bounded looking for `.harvest/` directories.
+ * Returns absolute paths of every match in filesystem-walk order (callers
+ * sort if they need a deterministic order).
  *
- * Per SPEC_DEFECTS I-5, this resolves the previously declared-but-unused
- * `--discover` flag.
+ * Pruning matches the historical {@link discoverKbChain} behavior: skip
+ * `node_modules` and dotted dirs (the latter naturally excludes nested
+ * `.harvest/` from being descended into — they were already captured at
+ * this level before the prune kicks in).
+ *
+ * Used by both {@link discoverKbChain} (legacy `--discover` mode) and the
+ * default {@link resolveKbChain} path (descent half of the union).
  */
-function discoverKbChain(discoverPath: string, cwd: string): KBChainEntry[] {
-  const root = path.resolve(discoverPath);
+function walkForKbs(root: string, maxDepth: number): string[] {
+  const rootAbs = path.resolve(root);
   const out: string[] = [];
-  if (!existsSync(root)) return [];
+  if (!existsSync(rootAbs)) return out;
 
   const stack: Array<{ dir: string; depth: number }> = [
-    { dir: root, depth: 0 },
+    { dir: rootAbs, depth: 0 },
   ];
-  const MAX_DEPTH = 6;
 
   while (stack.length > 0) {
     const { dir, depth } = stack.pop()!;
-    if (depth > MAX_DEPTH) continue;
+    if (depth > maxDepth) continue;
 
     let entries: import("node:fs").Dirent[];
     try {
@@ -311,6 +348,20 @@ function discoverKbChain(discoverPath: string, cwd: string): KBChainEntry[] {
     }
   }
 
+  return out;
+}
+
+/**
+ * Walk a directory tree looking for `.harvest/` directories. Used by
+ * `--discover <path>`. Cap depth at {@link MAX_DISCOVER_DEPTH} (covers
+ * typical monorepos) and prune heavy / hidden directories to keep this O(n)
+ * in practice.
+ *
+ * Per SPEC_DEFECTS I-5, this resolves the previously declared-but-unused
+ * `--discover` flag.
+ */
+function discoverKbChain(discoverPath: string, cwd: string): KBChainEntry[] {
+  const out = walkForKbs(discoverPath, MAX_DISCOVER_DEPTH);
   // Sort closest-to-root first for stable ordering. (This isn't quite the
   // same as cwd-based "closest-first" semantics, but for --discover we
   // surface them all and the agent decides per-session via get_kb_chain.)
@@ -343,7 +394,11 @@ function toChainEntry(
     kb_path: kbPath,
     kb_dir: kbDir,
     is_root: index === fullChain.length - 1,
-    depth_from_cwd: index,
+    // §9.3 / types.ts: 0 ⇔ cwd === kbDir. Path-distance based — array index
+    // is wrong once the chain mixes descent + ascent (descent KBs are not
+    // at the cwd, so index 0 doesn't mean depth 0). Symmetric like §5.1
+    // intent: "this KB is N hops away from the launch point".
+    depth_from_cwd: computeDepthFromCwd(cwd, kbDir),
     region_globs: regionGlobs,
     relative_to_cwd: path.relative(cwd, kbDir) || ".",
   };

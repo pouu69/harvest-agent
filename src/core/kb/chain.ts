@@ -121,6 +121,30 @@ export function isInKbRegion(
   return true;
 }
 
+/**
+ * Number of path segments separating `cwd` from `kbDir`. Used to populate
+ * `KBChainEntry.depth_from_cwd` (per §9.3 — "0 iff `kbDir === cwd`").
+ *
+ * Symmetric: a KB that is N levels above OR N levels below cwd both report
+ * `depth_from_cwd: N`. The field is informational and the spec doesn't
+ * commit to a sign, so we use the unsigned distance — which is what
+ * `path.relative` already gives via segment count.
+ *
+ * Shared between `get_kb_chain` (per-session tool) and `cli/start.ts`'s
+ * `toChainEntry` (runner-level chain). Previously the latter used
+ * `depth_from_cwd: index` which was incidentally correct for the walk-up-
+ * only chain (`index === 0 ⇒ cwd's own KB`) but became wrong once the
+ * chain mixes descent + ascent (descent KBs would silently report depth 0).
+ */
+export function computeDepthFromCwd(cwd: string, kbDir: string): number {
+  const cwdAbs = path.resolve(cwd);
+  const kbAbs = path.resolve(kbDir);
+  if (cwdAbs === kbAbs) return 0;
+  const rel = path.relative(kbAbs, cwdAbs);
+  if (rel === "" || rel === ".") return 0;
+  return rel.split(path.sep).length;
+}
+
 // -----------------------------------------------------------------------------
 // internals
 // -----------------------------------------------------------------------------

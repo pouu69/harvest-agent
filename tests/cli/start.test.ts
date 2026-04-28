@@ -191,6 +191,141 @@ describe("runStart — happy path", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// resolveKbChain: monorepo nested-KB discovery (I-15 / I-4 tail)
+//
+// Without --discover, the runner now walks BOTH up (§5.1) and down from cwd
+// to find every `.harvest/` it should lock + INDEX-rebuild. Without this,
+// running from a monorepo root left sub-app KBs as half-managed phantoms
+// (sessions accepted into the run but their KBs never locked or re-indexed).
+// §5.3 per-item routing is unchanged — this is purely about the runner's
+// chain composition.
+// ---------------------------------------------------------------------------
+
+describe("runStart — monorepo nested KB discovery (default chain)", () => {
+  it("finds nested .harvest/ under launch cwd in addition to walk-up ancestors", async () => {
+    // Layout:
+    //   <root>/.harvest          (root KB, also cwd's own)
+    //   <root>/apps/web/.harvest  (nested sub-app KB)
+    //   <root>/apps/api/.harvest  (nested sub-app KB)
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    mkdirSync(path.join(root, "apps", "web", ".harvest"), { recursive: true });
+    mkdirSync(path.join(root, "apps", "api", ".harvest"), { recursive: true });
+
+    let captured: { kbPaths: string[]; isRootFlags: boolean[] } | null = null;
+    const code = await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr: captured0(),
+      runAgentImpl: async (opts) => {
+        captured = {
+          kbPaths: opts.kbChain.map((e) => e.kb_path),
+          isRootFlags: opts.kbChain.map((e) => e.is_root),
+        };
+        return { exitCode: 0, resultSubtype: "success" };
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(captured).toBeTruthy();
+    expect(captured!.kbPaths).toEqual([
+      // Descent first, alphabetically sorted for determinism.
+      path.join(root, "apps", "api", ".harvest"),
+      path.join(root, "apps", "web", ".harvest"),
+      // Then walk-up — cwd's own KB is the topmost-ancestor here (cwd is the
+      // monorepo root), and lands at the chain's tail so is_root sticks.
+      path.join(root, ".harvest"),
+    ]);
+    // Only the last entry is_root.
+    expect(captured!.isRootFlags).toEqual([false, false, true]);
+  });
+
+  it("dedupes cwd's own KB when both walk-up and walk-down would surface it", async () => {
+    // Same KB from both walks: walk-up sees `<root>/.harvest` (cwd has it),
+    // walk-down sees the same. Result must include it exactly once, in its
+    // ascent position (last → is_root).
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    mkdirSync(path.join(root, "apps", "web", ".harvest"), { recursive: true });
+
+    let kbPaths: string[] = [];
+    await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr: captured0(),
+      runAgentImpl: async (opts) => {
+        kbPaths = opts.kbChain.map((e) => e.kb_path);
+        return { exitCode: 0, resultSubtype: "success" };
+      },
+    });
+
+    // No duplicates.
+    expect(new Set(kbPaths).size).toBe(kbPaths.length);
+    // Both KBs present.
+    expect(kbPaths).toContain(path.join(root, ".harvest"));
+    expect(kbPaths).toContain(path.join(root, "apps", "web", ".harvest"));
+  });
+
+  it("keeps single-KB regression: unchanged chain when there are no nested KBs", async () => {
+    // Plain repo: only cwd has .harvest. Behavior must match the pre-I-15
+    // walk-up-only result (single entry, is_root: true).
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+
+    let captured: { kbPaths: string[]; isRootFlags: boolean[] } | null = null;
+    await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr: captured0(),
+      runAgentImpl: async (opts) => {
+        captured = {
+          kbPaths: opts.kbChain.map((e) => e.kb_path),
+          isRootFlags: opts.kbChain.map((e) => e.is_root),
+        };
+        return { exitCode: 0, resultSubtype: "success" };
+      },
+    });
+
+    expect(captured!.kbPaths).toEqual([path.join(root, ".harvest")]);
+    expect(captured!.isRootFlags).toEqual([true]);
+  });
+
+  it("ignores nested .harvest/ that are masked by `node_modules` / dotted dirs", async () => {
+    // Walk-down's prune list excludes `node_modules` and any dotted
+    // directory. KBs inside those are deliberately invisible — third-party
+    // workspaces or stale `.cache/` content shouldn't pollute the run.
+    mkdirSync(path.join(root, ".harvest"), { recursive: true });
+    mkdirSync(
+      path.join(root, "node_modules", "some-pkg", ".harvest"),
+      { recursive: true },
+    );
+    mkdirSync(path.join(root, ".vendored", ".harvest"), { recursive: true });
+
+    let kbPaths: string[] = [];
+    await runStart({
+      cwd: root,
+      dryRun: false,
+      verbose: false,
+      json: false,
+      stdout: captured0(),
+      stderr: captured0(),
+      runAgentImpl: async (opts) => {
+        kbPaths = opts.kbChain.map((e) => e.kb_path);
+        return { exitCode: 0, resultSubtype: "success" };
+      },
+    });
+
+    expect(kbPaths).toEqual([path.join(root, ".harvest")]);
+  });
+});
+
 describe("runStart — reconciliation in completion summary", () => {
   it("appends '12 / 20 processed (8 deferred)' when targets remained unprocessed", async () => {
     mkdirSync(path.join(root, ".harvest"), { recursive: true });

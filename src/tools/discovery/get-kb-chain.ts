@@ -35,7 +35,7 @@ import * as path from "node:path";
 
 import { z } from "zod";
 
-import { findKbChain } from "../../core/kb/chain.js";
+import { computeDepthFromCwd, findKbChain } from "../../core/kb/chain.js";
 import type { KBChainEntry } from "../../core/types.js";
 
 // -----------------------------------------------------------------------------
@@ -99,7 +99,7 @@ export async function getKbChain(
   const entries: KBChainEntry[] = chain.map((kbPath, i) => {
     const kbDir = kbDirs[i]!;
     const isRoot = i === chain.length - 1;
-    const depth = computeDepth(input.cwd, kbDir);
+    const depth = computeDepthFromCwd(input.cwd, kbDir);
     const regionGlobs = buildRegionGlobs(kbDir, kbDirs);
     const relToCwd = posixRelative(input.cwd, kbDir);
     return {
@@ -121,15 +121,6 @@ export async function getKbChain(
 // -----------------------------------------------------------------------------
 // Internals
 // -----------------------------------------------------------------------------
-
-function computeDepth(cwd: string, kbDir: string): number {
-  const cwdAbs = path.resolve(cwd);
-  const kbAbs = path.resolve(kbDir);
-  if (cwdAbs === kbAbs) return 0;
-  const rel = path.relative(kbAbs, cwdAbs);
-  if (rel === "" || rel === ".") return 0;
-  return rel.split(path.sep).length;
-}
 
 function posixRelative(from: string, to: string): string {
   const rel = path.relative(from, to);

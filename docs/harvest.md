@@ -2011,7 +2011,12 @@ session이 미처리 = 모든 후보 KB의 processed.json 어느 곳에도
 
 ### 11.4 충돌 / 동시성 (Lock 메커니즘)
 
-`harvest start` 실행 시 각 KB 루트에 `.harvest/.lock` 파일을 생성한다. `--discover`로 여러 KB를 처리할 때는 KB 단위로 순차 락 획득/해제.
+`harvest start` 실행 시 KB 체인의 *모든* `.harvest/`에 락을 건다 (각 KB 루트의 `.harvest/.lock`). 체인 구성:
+
+- `--discover <PATH>` 명시 시: 그 경로 하위에서 발견된 모든 `.harvest/`.
+- 기본값: launch cwd로부터 walk-up(§5.1 ancestor chain) ∪ launch cwd 하위 walk-down으로 발견된 모든 `.harvest/`. 즉 monorepo root에서 실행해도 sub-app `.harvest/`까지 자동 포함되어 락/INDEX 리빌드 대상이 된다 (§5.3 per-item 라우팅 자체는 unchanged — 항목별 KB는 여전히 touched files 기반으로 결정).
+
+KB 단위로 순차 락 획득/해제. all-or-nothing — 한 KB라도 락 충돌 시 이미 획득한 락을 모두 해제하고 exit 4.
 
 **lock 파일 포맷** (JSON):
 
@@ -2120,8 +2125,10 @@ Creating .harvest/ in each:
 
 **목적**: 미처리 세션을 분석하여 KB 갱신 (10단계 파이프라인 실행).
 
+**기본 KB 스코프**: launch cwd로부터 walk-up(§5.1 ancestor chain) + launch cwd 하위 walk-down으로 발견된 모든 `.harvest/`를 함께 처리한다. 즉 monorepo root에서 실행하면 root + 모든 sub-app KB가 자동으로 동일 run의 대상이 된다 (락, INDEX 리빌드, processed.json 동기화 모두 일관). §5.3의 *per-item 라우팅* 정책은 그대로 — 항목은 여전히 touched files를 기준으로 가장 가까운 KB로 라우팅된다.
+
 **옵션**:
-- `--discover <PATH>`: 지정 경로 하위에서 모든 `.harvest/` 자동 탐색 (cwd 무시)
+- `--discover <PATH>`: 지정 경로 하위에서만 `.harvest/` 자동 탐색 (cwd 기반 기본 동작 무시). 임의 경로의 KB 셋을 명시적으로 지정하고 싶을 때.
 - `--dry-run`: 실제 쓰기 없이 무엇이 일어날지만 출력
 - `--verbose`: 단계별 디테일 로그
 - `--since <ISO8601>`: 특정 시점 이후 세션만 처리
