@@ -7,8 +7,6 @@
 
 ---
 
-## 무엇을 위한 도구인가
-
 Claude Code 세션은 매번 휘발된다. 한 세션에서 발생한 다음과 같은 가치 있는 지식이 다음 세션에 전달되지 못한다.
 
 - **결정(Decisions)** — 왜 이 라이브러리를 골랐는가, 왜 이 아키텍처인가
@@ -16,27 +14,26 @@ Claude Code 세션은 매번 휘발된다. 한 세션에서 발생한 다음과 
 - **재사용 자산(Reusable)** — 다른 프로젝트에서도 쓸 만한 스니펫/접근법
 - **반복하면 안 되는 실수(Anti-patterns)** — 시행착오로 알게 된 함정
 
-결과적으로 같은 실수가 반복되거나 이미 내린 결정을 다시 고민하게 된다.
-
-Harvest 는 사용자가 `harvest start` 를 실행하면 미처리 transcript 들을 분석하여, 위 4 카테고리 KB 에 항목을 *만들고 / 머지하고 / 폐기한다*. 결과물은 평문 마크다운으로 `.harvest/` 아래 저장되고, `CLAUDE.md` 의 `@`-import 한 줄을 통해 다음 세션에 자동 주입된다.
-
-```
-┌──────────────────┐    ┌────────────────────┐    ┌──────────────────────┐
-│  harvest init    │ →  │  Claude Code 세션  │ →  │  harvest start       │
-│  (KB 폴더 생성)  │    │  (transcript 누적) │    │  (Agent 가 분석/수확)│
-└──────────────────┘    └────────────────────┘    └──────────────────────┘
-                                                              │
-                                                              ▼
-                          ┌──────────────────────────────────────┐
-                          │  .harvest/INDEX.md + items/*.md      │
-                          │  → CLAUDE.md @-import 으로 다음 세션 │
-                          │     자동 주입                        │
-                          └──────────────────────────────────────┘
-```
+결과적으로 같은 실수가 반복되거나 이미 내린 결정을 다시 고민하게 된다. Harvest 는 사용자가 `harvest start` 를 실행하면 미처리 transcript 들을 분석하여, 위 4 카테고리 KB 에 항목을 *만들고 / 머지하고 / 폐기한다*. 결과물은 평문 마크다운으로 `.harvest/` 아래 저장되고, `CLAUDE.md` 의 `@`-import 한 줄을 통해 다음 세션에 자동 주입된다.
 
 ---
 
-## 특징
+## 목차
+
+1. [Features](#features)
+2. [Architecture](#architecture)
+3. [Installation](#installation)
+4. [Quick Start](#quick-start)
+5. [Configuration](#configuration)
+6. [CLI Reference](#cli-reference)
+7. [LLM wiki / RAG 와의 차이](#llm-wiki--rag-와의-차이)
+8. [Security](#security)
+9. [Further Reading](#further-reading)
+10. [License](#license)
+
+---
+
+## Features
 
 ### 4 카테고리 KB, 평문 마크다운
 
@@ -86,33 +83,25 @@ LLM 호출은 좁은 출구 두 곳에서만 발생한다 — (1) transcript 에
 
 ---
 
-## LLM wiki / RAG 메모 도구와의 차이
+## Architecture
 
-Notion AI / Mem.ai / Obsidian + AI 플러그인 / 사내 RAG wiki 같은 일반적인 "LLM wiki" 접근과 비교하면, Harvest 의 포지션은 다음과 같이 다르다.
-
-| 축 | 일반 LLM wiki / RAG 메모 | Harvest |
-|---|---|---|
-| **지식 소스** | 사용자가 직접 작성한 노트 / 업로드한 문서 | Claude Code 가 이미 만들어낸 transcript — **저작 부담 0** |
-| **수집 시점** | 사용자가 적을 때 (수동, 의도적) | `harvest start` 한 번 — **세션 종료 후 일괄 수확** |
-| **분류 체계** | 자유 폼 / 사용자 태그 | 4 카테고리 고정 (decisions / learnings / reusable / anti-patterns) — **의견이 있는 라우팅** |
-| **성장 방식** | Monotonic — 적을수록 커짐 | **농축(Concentration)** — 머지 / supersede / archive 가 우선, 신규 작성은 마지막 수단 |
-| **검색 방식** | 쿼리 시점에 임베딩 / 벡터 검색 (RAG) | **검색 없음** — INDEX 가 launch 시 자동 주입되고, Claude 가 필요한 항목을 직접 Read |
-| **LLM 사용 위치** | 모든 retrieval / 답변 생성 단계 | **좁은 출구만** — extract + tie-break. 라우팅 / 머지 / INDEX 빌드는 결정론 |
-| **저장 형식** | 자체 DB / 벡터 인덱스 / 클라우드 | 평문 마크다운 + git — **diff / review / portable** |
-| **컨텍스트 주입** | 사용자가 명시적으로 검색해야 함 | `CLAUDE.md` `@`-import 으로 **다음 세션에 자동 주입** |
-| **스코프** | 보통 글로벌 / 사용자별 | **프로젝트별 + 모노레포 KB chain** (자식이 부모를 상속) |
-| **멱등성** | 같은 입력에도 인덱스 / 모델 상태에 따라 결과 변동 | `processed.json` ledger + atomic write + lock — **같은 transcript 를 두 번 처리하지 않음** |
-
-핵심 차이는 두 가지다.
-
-1. **Pull 이 아니라 Push** — RAG wiki 는 "물어봐야 답한다". Harvest 는 다음 세션 시작 순간 INDEX 가 컨텍스트에 들어가 있어, Claude 가 묻지 않아도 알고 시작한다.
-2. **저장이 아니라 농축** — wiki 는 "안 잊어버리도록 적는 곳". Harvest 는 "이미 일어난 일에서 *반복 가능한 지식만* 골라 작게 유지하는 곳". 머지 / supersede / archive 가 1급 시민이다.
-
-Harvest 는 RAG 를 대체하지 않는다 — 대규모 문서 검색이나 자유 질의응답이 필요하면 wiki 가 맞다. Harvest 는 *Claude Code 세션이 매번 같은 실수를 반복하지 않게 하는* 좁은 문제에 특화되어 있다.
+```
+┌──────────────────┐    ┌────────────────────┐    ┌──────────────────────┐
+│  harvest init    │ →  │  Claude Code 세션  │ →  │  harvest start       │
+│  (KB 폴더 생성)  │    │  (transcript 누적) │    │  (Agent 가 분석/수확)│
+└──────────────────┘    └────────────────────┘    └──────────────────────┘
+                                                              │
+                                                              ▼
+                          ┌──────────────────────────────────────┐
+                          │  .harvest/INDEX.md + items/*.md      │
+                          │  → CLAUDE.md @-import 으로 다음 세션 │
+                          │     자동 주입                        │
+                          └──────────────────────────────────────┘
+```
 
 ---
 
-## 설치
+## Installation
 
 **사전 요구**: Node.js 20+ / 사용할 provider 의 API key 1 개.
 
@@ -128,41 +117,44 @@ harvest --version
 
 ---
 
-## 사용법
+## Quick Start
 
-### Quick start
+### 최초 1 회 — 사용자 설정 + KB 초기화
 
 ```bash
-# ── 1. 한 번만: 사용자 설정 + KB 초기화 ──────────────────────
 harvest --version                         # 첫 실행: ~/.harvest/config.json 자동 생성 후 exit 0
 $EDITOR ~/.harvest/config.json            # HARVEST_PROVIDER + 해당 API key 입력
 
 cd ~/projects/my-app
 harvest init                              # .harvest/ 생성 + CLAUDE.md 마커 블록 삽입
-
-# ── 2. 평소처럼 Claude Code 로 작업 ────────────────────────
-#    transcript 가 ~/.claude/projects/<slug>/*.jsonl 에 자동 누적됨
-
-# ── 3. 주기적으로: 미처리 세션 수확 ─────────────────────────
-harvest start                             # Agent 가 분석 → 4 카테고리 KB 갱신
-git diff .harvest/                        # 변경 검토
 ```
 
-다음 Claude Code 세션이 launch 될 때 `CLAUDE.md` 의 `@.harvest/INDEX.md` 가 자동 로드되어, 직전 세션들의 핵심 지식을 갖고 시작한다.
+단일 프로젝트는 `harvest init` 그대로. 모노레포라면 `.harvest/` 를 두고 싶은 디렉토리로 이동한 뒤 같은 명령 — cwd + monorepo root 두 곳에 만들지 y/N 으로 묻는다. 모든 워크스페이스에 한 번에 만들고 싶으면 `harvest init --all`. 비-대화형 환경에선 `--yes` 로 프롬프트 스킵.
 
-### 일회성 셋업
+### 매번의 워크플로우
 
-**KB 초기화** — 단일 프로젝트는 그냥:
+평소처럼 Claude Code 로 작업하면 transcript 가 `~/.claude/projects/<slug>/*.jsonl` 에 자동 누적된다. 주기적으로 미처리 세션을 수확한다.
 
 ```bash
-harvest init
+harvest start                                # 모든 미처리 transcript 처리
+harvest start --recent 5                     # 최근 5 개 세션만 (첫 실행 backlog 용)
+harvest start --since 2026-04-01T00:00:00Z   # 특정 시점 이후만
+harvest start --dry-run                      # 실제 쓰기 없이 의도만 출력
+
+git diff .harvest/                           # 변경 검토 → commit 또는 그대로 두기
 ```
 
-모노레포라면 `.harvest/` 를 두고 싶은 디렉토리로 이동한 뒤 같은 명령. cwd + monorepo root 두 곳에 만들지 y/N 으로 묻는다. 모든 워크스페이스에 한 번에 만들고 싶으면 `harvest init --all`. 비-대화형 환경에선 `--yes` 로 프롬프트 스킵.
+다음 Claude Code 세션이 launch 될 때 `CLAUDE.md` 의 `@.harvest/INDEX.md` 가 자동 로드되어, 직전 세션들의 핵심 지식을 갖고 시작한다. KB 파일은 사용자가 직접 편집해도 다음 `harvest start` 가 INDEX 를 자동 동기화한다.
 
-**사용자 설정** — provider / API key 는 `~/.harvest/config.json` **한 곳에서만** 관리한다. 다른 프로젝트로 이동해도 같은 설정이 따라간다.
+---
 
-처음으로 `harvest` 를 실행하면 (`harvest --version`, `harvest --help`, 무엇이든) `~/.harvest/config.json` 이 자동 생성되고, stderr 에 안내가 출력된 뒤 exit 0 으로 종료된다. 자동 생성된 파일은 다음과 같이 맨 위 `_README` 인라인 도움말 + 모든 환경변수 키가 빈 문자열로 들어 있다:
+## Configuration
+
+provider / API key 등 사용자 설정은 `~/.harvest/config.json` **한 곳에서만** 관리한다. 다른 프로젝트로 이동해도 같은 설정이 따라가며, 별도의 우선순위 체계나 CWD `.env` / `.env.local` 등으로의 fallback 은 없다.
+
+### `~/.harvest/config.json`
+
+처음으로 `harvest` 를 실행하면 (`harvest --version`, `harvest --help`, 무엇이든) 파일이 자동 생성되고, stderr 에 안내가 출력된 뒤 exit 0 으로 종료된다. 자동 생성된 파일은 다음과 같이 맨 위 `_README` 인라인 도움말 + 모든 환경변수 키가 빈 문자열로 들어 있다.
 
 ```json
 {
@@ -198,22 +190,28 @@ harvest init
 }
 ```
 
-빈 문자열 값은 "미설정" 으로 취급되어 무시된다 (default 가 그대로 적용). 비어있지 않은 값은 매 실행 시 `process.env` 에 그대로 주입된다 — `~/.harvest/config.json` 이 단일 진실 소스이고, 별도의 우선순위 체계는 없다.
+빈 문자열 값은 "미설정" 으로 취급되어 무시된다 (default 가 그대로 적용). 비어있지 않은 값은 매 실행 시 `process.env` 에 그대로 주입된다.
 
-### 매번의 워크플로우
+### 환경 변수
 
-```bash
-harvest start                  # 모든 미처리 transcript 처리
-harvest start --recent 5       # 최근 5 개 세션만 (첫 실행 backlog 용)
-harvest start --since 2026-04-01T00:00:00Z   # 특정 시점 이후만
-harvest start --dry-run        # 실제 쓰기 없이 의도만 출력
-```
+`~/.harvest/config.json` 에 들어가는 키들. 하단 두 항목 (`HARVEST_DEBUG`, `HARVEST_TEST_LLM`) 은 dev 전용이라 템플릿엔 없고 필요 시 shell 에서 export 한다.
 
-처리 후엔 `git diff .harvest/` 로 변경을 검토하고, 만족스러우면 commit 또는 그대로 두면 된다 (KB 파일은 사용자가 직접 편집해도 다음 `harvest start` 가 INDEX 를 자동 동기화한다).
+| 변수 | 용도 | 기본 |
+|---|---|---|
+| `HARVEST_PROVIDER` | `anthropic` / `openai` / `google` | `anthropic` |
+| `HARVEST_MODEL` | Agent 모델 오버라이드 | provider별 default |
+| `HARVEST_EXTRACT_MODEL` | EXTRACT 단계(`extract_items_from_transcript`) 모델 오버라이드 | `HARVEST_MODEL` 따름 |
+| `HARVEST_GATEWAY_URL` | provider SDK 의 default endpoint 를 override (corporate / on-prem gateway 용) | — |
+| `ANTHROPIC_API_KEY` | Anthropic provider 사용 시 | — |
+| `OPENAI_API_KEY` | OpenAI provider 사용 시 | — |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | Google provider 사용 시 | — |
+| `HARVEST_TRANSCRIPT_DIR` | transcript 디렉토리 오버라이드 | `~/.claude/projects` |
+| `HARVEST_DEBUG` *(dev)* | `1` → stderr 에 LLM I/O raw 덤프 + config.json 적용 키 수 | `0` |
+| `HARVEST_TEST_LLM` *(dev)* | `live` / `mock` / `replay` / `record` (테스트용) | `live` |
 
 ---
 
-## 명령어 요약
+## CLI Reference
 
 ### `harvest init`
 
@@ -241,9 +239,12 @@ harvest start --dry-run        # 실제 쓰기 없이 의도만 출력
 
 ### Global
 
-`-h, --help` / `-v, --version`
+| 플래그 | 설명 |
+|---|---|
+| `-h`, `--help` | 도움말 출력 |
+| `-v`, `--version` | 버전 출력 |
 
-### 종료 코드
+### Exit Codes
 
 | 코드 | 의미 |
 |---|---|
@@ -256,26 +257,33 @@ harvest start --dry-run        # 실제 쓰기 없이 의도만 출력
 
 ---
 
-## 환경 변수
+## LLM wiki / RAG 와의 차이
 
-`~/.harvest/config.json` 에 들어가는 키들. 하단 두 항목 (`HARVEST_DEBUG`, `HARVEST_TEST_LLM`) 은 dev 전용이라 템플릿엔 없고 필요 시 shell 에서 export 한다.
+Notion AI / Mem.ai / Obsidian + AI 플러그인 / 사내 RAG wiki 같은 일반적인 "LLM wiki" 접근과 비교하면, Harvest 의 포지션은 다음과 같이 다르다.
 
-| 변수 | 용도 | 기본 |
+| 축 | 일반 LLM wiki / RAG 메모 | Harvest |
 |---|---|---|
-| `HARVEST_PROVIDER` | `anthropic` / `openai` / `google` | `anthropic` |
-| `HARVEST_MODEL` | Agent 모델 오버라이드 | provider별 default |
-| `HARVEST_EXTRACT_MODEL` | EXTRACT 단계(`extract_items_from_transcript`) 모델 오버라이드 | `HARVEST_MODEL` 따름 |
-| `HARVEST_GATEWAY_URL` | provider SDK 의 default endpoint 를 override (corporate / on-prem gateway 용) | — |
-| `ANTHROPIC_API_KEY` | Anthropic provider 사용 시 | — |
-| `OPENAI_API_KEY` | OpenAI provider 사용 시 | — |
-| `GOOGLE_GENERATIVE_AI_API_KEY` | Google provider 사용 시 | — |
-| `HARVEST_TRANSCRIPT_DIR` | transcript 디렉토리 오버라이드 | `~/.claude/projects` |
-| `HARVEST_DEBUG` *(dev)* | `1` → stderr 에 LLM I/O raw 덤프 + config.json 적용 키 수 | `0` |
-| `HARVEST_TEST_LLM` *(dev)* | `live` / `mock` / `replay` / `record` (테스트용) | `live` |
+| **지식 소스** | 사용자가 직접 작성한 노트 / 업로드한 문서 | Claude Code 가 이미 만들어낸 transcript — **저작 부담 0** |
+| **수집 시점** | 사용자가 적을 때 (수동, 의도적) | `harvest start` 한 번 — **세션 종료 후 일괄 수확** |
+| **분류 체계** | 자유 폼 / 사용자 태그 | 4 카테고리 고정 (decisions / learnings / reusable / anti-patterns) — **의견이 있는 라우팅** |
+| **성장 방식** | Monotonic — 적을수록 커짐 | **농축(Concentration)** — 머지 / supersede / archive 가 우선, 신규 작성은 마지막 수단 |
+| **검색 방식** | 쿼리 시점에 임베딩 / 벡터 검색 (RAG) | **검색 없음** — INDEX 가 launch 시 자동 주입되고, Claude 가 필요한 항목을 직접 Read |
+| **LLM 사용 위치** | 모든 retrieval / 답변 생성 단계 | **좁은 출구만** — extract + tie-break. 라우팅 / 머지 / INDEX 빌드는 결정론 |
+| **저장 형식** | 자체 DB / 벡터 인덱스 / 클라우드 | 평문 마크다운 + git — **diff / review / portable** |
+| **컨텍스트 주입** | 사용자가 명시적으로 검색해야 함 | `CLAUDE.md` `@`-import 으로 **다음 세션에 자동 주입** |
+| **스코프** | 보통 글로벌 / 사용자별 | **프로젝트별 + 모노레포 KB chain** (자식이 부모를 상속) |
+| **멱등성** | 같은 입력에도 인덱스 / 모델 상태에 따라 결과 변동 | `processed.json` ledger + atomic write + lock — **같은 transcript 를 두 번 처리하지 않음** |
+
+핵심 차이는 두 가지다.
+
+1. **Pull 이 아니라 Push** — RAG wiki 는 "물어봐야 답한다". Harvest 는 다음 세션 시작 순간 INDEX 가 컨텍스트에 들어가 있어, Claude 가 묻지 않아도 알고 시작한다.
+2. **저장이 아니라 농축** — wiki 는 "안 잊어버리도록 적는 곳". Harvest 는 "이미 일어난 일에서 *반복 가능한 지식만* 골라 작게 유지하는 곳". 머지 / supersede / archive 가 1급 시민이다.
+
+Harvest 는 RAG 를 대체하지 않는다 — 대규모 문서 검색이나 자유 질의응답이 필요하면 wiki 가 맞다. Harvest 는 *Claude Code 세션이 매번 같은 실수를 반복하지 않게 하는* 좁은 문제에 특화되어 있다.
 
 ---
 
-## 보안
+## Security
 
 - **API key 는 `~/.harvest/config.json` 으로만 수신** — CLI argv 에는 절대 노출되지 않음. 파일은 사용자 홈 디렉터리에 있으므로 프로젝트 git 저장소와 분리되어 있고, `.gitignore` 관리도 불필요.
 - **transcript 내용은 LLM 으로 전송된다** — transcript 안에 시크릿/토큰이 포함될 수 있음을 인지하고 사용. v1 은 `--redact-secrets` 미지원.
@@ -283,7 +291,7 @@ harvest start --dry-run        # 실제 쓰기 없이 의도만 출력
 
 ---
 
-## 더 읽을 거리
+## Further Reading
 
 - [`docs/harvest.md`](./docs/harvest.md) — 구현 계획서 (single source of truth, v2.3).
 - [`docs/product.md`](./docs/product.md) — 제품 프레이밍.
